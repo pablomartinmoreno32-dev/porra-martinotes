@@ -376,6 +376,11 @@ def _load_sheets_into_sqlite(conn: sqlite3.Connection) -> None:
             converted = [_convert_cell(row_dict.get(col, ""), type_map.get(col, "TEXT")) for col in headers]
             if any(v is not None for v in converted):
                 rows_to_insert.append(converted)
+        if table == "scoring_rules":
+            rows_to_insert = [
+                row for row in rows_to_insert
+                if row[2] is not None and row[3] is not None
+            ]
         if rows_to_insert:
             conn.executemany(insert_sql, rows_to_insert)
 
