@@ -610,19 +610,36 @@ def get_tournament_by_code(join_code: str) -> sqlite3.Row | None:
     return get_one("SELECT * FROM tournaments WHERE UPPER(join_code)=UPPER(?)", [join_code.strip()])
 
 def create_tournament(name: str, join_code: str, admin_pin: str) -> int:
+    clean_join_code = join_code.upper().strip()
+    clean_admin_pin = admin_pin.strip()
+
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO tournaments(name, join_code, admin_pin) VALUES (?, ?, ?)",
-            (name, join_code.upper().strip(), admin_pin.strip()),
+            """
+            INSERT INTO tournaments(name, join_code, admin_pin)
+            VALUES (?, ?, ?)
+            ON CONFLICT(join_code) DO UPDATE SET
+                name = excluded.name,
+                admin_pin = excluded.admin_pin
+            RETURNING id
+            """,
+            (name, clean_join_code, clean_admin_pin),
         )
-        tournament_id = int(cur.lastrowid)
+
+        tournament_id = int(cur.fetchone()[0])
+
         for k, v in DEFAULT_RULES.items():
             conn.execute(
-                "INSERT INTO scoring_rules(tournament_id, rule_key, rule_value) VALUES (?, ?, ?)",
+                """
+                INSERT INTO scoring_rules(tournament_id, rule_key, rule_value)
+                VALUES (?, ?, ?)
+                ON CONFLICT(tournament_id, rule_key) DO UPDATE SET
+                    rule_value = excluded.rule_value
+                """,
                 (tournament_id, k, float(v)),
             )
-        return tournament_id
 
+        return tournament_id
 
 def ensure_default_rules(tournament_id: int) -> None:
     for k, v in DEFAULT_RULES.items():
