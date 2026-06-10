@@ -12,7 +12,7 @@ import pandas as pd
 
 # Local cache. In Google Sheets mode this file is only a temporary working copy;
 # Google Sheets remains the persistent source of truth.
-DB_PATH = Path(os.getenv("PORRA_DB_PATH", "porra_martinotes.db"))
+DB_PATH = Path(os.getenv("PORRA_DB_PATH", str(Path(tempfile.gettempdir()) / "porra_martinotes.db")))
 
 SHEETS_TABLES = [
     "tournaments",
