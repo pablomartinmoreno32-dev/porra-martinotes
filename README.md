@@ -1,50 +1,56 @@
-# Porra Martinotes - versión conversación completa
+# Porra Martinotes
 
-App Streamlit/Python para gestionar una porra del Mundial.
+Aplicación Streamlit para gestionar una porra del Mundial 2026 entre amigos.
 
-## Ejecutar en local
+## Qué incluye esta versión
 
-```cmd
-cd /d "C:\Users\USER\Downloads\Personal\Temas de Estudio\App Mundial\porra_martinotes_I"
+- Login por código de torneo, nombre y PIN.
+- Perfil jugador y perfil administrador.
+- Predicciones de fase de grupos.
+- Predicciones de eliminatorias por ronda.
+- Predicciones extra.
+- Vista de predicciones de compañeros en modo solo lectura.
+- Gestión de partidos y resultados oficiales por administrador.
+- Generación de ronda de 32 con lógica FIFA para mejores terceros.
+- Generación de rondas posteriores a partir de ganadores reales.
+- Clasificación deportiva de grupos.
+- Clasificación general de la porra.
+- SQLite local como caché/base operativa.
+- Sincronización opcional con Google Sheets.
+
+## Ejecución local
+
+```bash
 python -m venv .venv
-.venv\Scripts\activate.bat
+.venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Después abre: http://localhost:8501
+En macOS/Linux:
 
-## Accesos demo
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-- Código torneo: `MARTINOTES`
-- PIN admin: `9999`
+## Archivos principales
 
-## Funcionalidad incluida
+- `app.py`: interfaz Streamlit y flujo de jugador/admin.
+- `database.py`: persistencia SQLite y sincronización opcional con Google Sheets.
+- `scoring.py`: clasificación deportiva y ranking de la porra.
+- `bracket_fifa.py`: generación de cruces de ronda de 32 según mejores terceros.
+- `seed_data.py`: equipos, grupos, rondas, extras y reglas iniciales.
 
-- Acceso jugador con nombre + PIN personal.
-- Acceso admin separado.
-- Rondas con cierre configurable.
-- Partidos/resultados con filtros.
-- Crear, editar y eliminar partidos.
-- Guardar todos los resultados visibles.
-- 0-0 válido solo cuando el resultado está confirmado.
-- Clasificación fase de grupos.
-- Predicciones iniciales por jornada.
-- Bracket inicial automático desde predicciones de grupos.
-- Predicciones estándar por ronda.
-- Penaltis: si se marca penaltis, se oculta el marcador y obliga a elegir quién pasa.
-- Ronda de 32 automática desde la clasificación real, con criterio simplificado acordado.
-- Bracket admin básico.
-- Reglas de puntuación editables.
-- Clasificación general.
-- Bonus por predicción inicial: octavos +1, cuartos +3, semis +6, final +12, campeón +25.
-- Extras: Balón de Oro 25; Bota de Oro, Guante de Oro, Mejor Joven, Equipo más entretenido y Gol del Torneo 15 cada uno.
-- Extras con texto libre y validación manual del admin.
+## Credenciales
 
-## Nota sobre bracket
+No subas `service_account.json` a GitHub. Usa secretos de Streamlit Cloud.
 
-La generación automática usa los criterios simplificados acordados en conversación: clasificación de grupo por puntos + enfrentamiento directo + DG + GF + orden alfabético; mejores terceros por puntos + DG + GF + orden alfabético. La asignación de cruces es determinista y testeable, no la matriz oficial FIFA de 495 combinaciones.
+## Despliegue en Streamlit Cloud
 
-## Modo Google Sheets
-
-Ver `README_GOOGLE_SHEETS.md`.
+1. Sube estos archivos al repositorio GitHub.
+2. En Streamlit Cloud, apunta a `app.py`.
+3. Configura los secretos de Google Sheets si quieres persistencia en Sheets.
+4. Reinicia la app.
