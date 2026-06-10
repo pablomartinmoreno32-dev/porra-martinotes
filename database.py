@@ -253,6 +253,79 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "predictions", "locked_at", "TEXT")
 
 
+
+def _dedupe_matches(conn: sqlite3.Connection, tournament_id: int | None = None) -> None:
+    """Remove duplicated match rows and preserve predictions where possible.
+
+    Duplicates can appear if the default seed runs more than once or if Google
+    Sheets is re-imported after partial deployments. The natural key is the match
+    identity shown to users: tournament, round/phase/group/matchday/slot and both
+    teams. We keep one canonical row, move predictions to it when safe, and then
+    delete the duplicate match rows.
+    """
+    conn.execute("DROP TABLE IF EXISTS _match_dedup_map")
+    conn.execute("CREATE TEMP TABLE _match_dedup_map(old_id INTEGER PRIMARY KEY, keep_id INTEGER NOT NULL)")
+
+    params: list[Any] = []
+    where = ""
+    if tournament_id is not None:
+        where = "WHERE m.tournament_id=?"
+        params.append(tournament_id)
+
+    conn.execute(
+        f"""
+        INSERT INTO _match_dedup_map(old_id, keep_id)
+        SELECT m.id AS old_id,
+               (
+                   SELECT k.id
+                   FROM matches k
+                   WHERE k.tournament_id = m.tournament_id
+                     AND k.round_key = m.round_key
+                     AND k.phase = m.phase
+                     AND COALESCE(k.group_letter, '') = COALESCE(m.group_letter, '')
+                     AND COALESCE(k.matchday, -1) = COALESCE(m.matchday, -1)
+                     AND COALESCE(k.bracket_slot, '') = COALESCE(m.bracket_slot, '')
+                     AND k.home_team_id = m.home_team_id
+                     AND k.away_team_id = m.away_team_id
+                   ORDER BY CASE WHEN k.status='played' THEN 0 ELSE 1 END, k.id
+                   LIMIT 1
+               ) AS keep_id
+        FROM matches m
+        {where}
+        """,
+        params,
+    )
+    conn.execute("DELETE FROM _match_dedup_map WHERE old_id = keep_id")
+
+    # If a participant already has a prediction for the canonical match, drop the
+    # duplicate prediction before moving the rest to avoid UNIQUE violations.
+    conn.execute(
+        """
+        DELETE FROM predictions
+        WHERE match_id IN (SELECT old_id FROM _match_dedup_map)
+          AND EXISTS (
+              SELECT 1
+              FROM _match_dedup_map dm
+              JOIN predictions p2
+                ON p2.match_id = dm.keep_id
+               AND p2.tournament_id = predictions.tournament_id
+               AND p2.participant_id = predictions.participant_id
+               AND p2.scope = predictions.scope
+              WHERE dm.old_id = predictions.match_id
+          )
+        """
+    )
+    conn.execute(
+        """
+        UPDATE predictions
+        SET match_id = (SELECT keep_id FROM _match_dedup_map WHERE old_id = predictions.match_id)
+        WHERE match_id IN (SELECT old_id FROM _match_dedup_map)
+        """
+    )
+    conn.execute("DELETE FROM matches WHERE id IN (SELECT old_id FROM _match_dedup_map)")
+    conn.execute("DROP TABLE IF EXISTS _match_dedup_map")
+
+
 def _streamlit_secrets() -> dict[str, Any]:
     try:
         import streamlit as st
@@ -738,16 +811,51 @@ def add_match(
     kickoff_datetime: str | None = None,
     origin: str = "manual",
     bracket_slot: str | None = None,
-) -> None:
-    execute(
-        """
-        INSERT INTO matches(
-            tournament_id, round_key, phase, group_letter, matchday,
-            home_team_id, away_team_id, kickoff_datetime, origin, bracket_slot
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [tournament_id, round_key, phase, group_letter, matchday, home_team_id, away_team_id, kickoff_datetime, origin, bracket_slot],
-    )
+) -> int:
+    """Create a match only if the same fixture does not already exist."""
+    with get_conn() as conn:
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM matches
+            WHERE tournament_id=?
+              AND round_key=?
+              AND phase=?
+              AND COALESCE(group_letter, '') = COALESCE(?, '')
+              AND COALESCE(matchday, -1) = COALESCE(?, -1)
+              AND COALESCE(bracket_slot, '') = COALESCE(?, '')
+              AND home_team_id=?
+              AND away_team_id=?
+            ORDER BY id
+            LIMIT 1
+            """,
+            [tournament_id, round_key, phase, group_letter, matchday, bracket_slot, home_team_id, away_team_id],
+        ).fetchone()
+
+        if existing:
+            match_id = int(existing["id"])
+            conn.execute(
+                """
+                UPDATE matches
+                SET kickoff_datetime=COALESCE(?, kickoff_datetime),
+                    origin=COALESCE(?, origin),
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                [kickoff_datetime, origin, match_id],
+            )
+            return match_id
+
+        cur = conn.execute(
+            """
+            INSERT INTO matches(
+                tournament_id, round_key, phase, group_letter, matchday,
+                home_team_id, away_team_id, kickoff_datetime, origin, bracket_slot
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [tournament_id, round_key, phase, group_letter, matchday, home_team_id, away_team_id, kickoff_datetime, origin, bracket_slot],
+        )
+        return int(cur.lastrowid)
 
 
 def upsert_prediction(
@@ -963,6 +1071,7 @@ def seed_default_tournament() -> int:
                         (tournament_id, round_key, round_name, status, lock_datetime),
                     )
                 conn.execute("DELETE FROM rounds WHERE tournament_id=? AND round_key IN ('r32', 'semis')", (tournament_id,))
+                _dedupe_matches(conn, tournament_id)
             return tournament_id
 
         tournament_id = create_tournament("Porra Martinotes", DEFAULT_TOURNAMENT_CODE, DEFAULT_ADMIN_PIN)
@@ -987,6 +1096,8 @@ def seed_default_tournament() -> int:
                     kickoff_datetime=None,
                     origin="seed_demo",
                 )
+        with get_conn() as conn:
+            _dedupe_matches(conn, tournament_id)
         return tournament_id
 
     if sheets_enabled():
