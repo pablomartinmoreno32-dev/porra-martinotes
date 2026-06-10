@@ -252,8 +252,9 @@ def render_score_rules(tournament_id: int) -> None:
                 "extra_equipo_entretenido": extra_eq,
                 "extra_gol_torneo": extra_gt,
             }
-            for k, v in values.items():
-                db.set_rule(tournament_id, k, v)
+            with db.defer_sheets_sync():
+                for k, v in values.items():
+                    db.set_rule(tournament_id, k, v)
             st.success("Reglas guardadas.")
             rerun()
 
@@ -462,9 +463,10 @@ def render_matches_results(tournament_id: int, admin: bool) -> None:
         st.caption("Introduce o modifica varios marcadores y pulsa el botón para persistir todos los resultados visibles.")
         if st.button("Guardar todos los resultados visibles", type="primary", key="save_all_visible_results"):
             saved = 0
-            for row in changes:
-                db.update_match_result(*row)
-                saved += 1
+            with db.defer_sheets_sync():
+                for row in changes:
+                    db.update_match_result(*row)
+                    saved += 1
             st.cache_data.clear()
             st.success(f"Se han guardado {saved} resultados visibles. La clasificación se recalcula automáticamente.")
             rerun()
@@ -658,8 +660,9 @@ def render_predictions(tournament_id: int, participant_id: int) -> None:
             if is_round_locked(tournament_id, "grupos"):
                 st.error("No se puede guardar: ronda cerrada.")
             else:
-                for mid, hg, ag, winner, et, pen in to_save:
-                    db.upsert_prediction(tournament_id, participant_id, mid, hg, ag, "initial", "grupos", winner, et, pen, True)
+                with db.defer_sheets_sync():
+                    for mid, hg, ag, winner, et, pen in to_save:
+                        db.upsert_prediction(tournament_id, participant_id, mid, hg, ag, "initial", "grupos", winner, et, pen, True)
                 st.success("Predicciones guardadas.")
                 rerun()
 
@@ -680,8 +683,9 @@ def render_predictions(tournament_id: int, participant_id: int) -> None:
                 if is_round_locked(tournament_id, rk):
                     st.error("No se puede guardar: ronda cerrada.")
                 else:
-                    for mid, hg, ag, winner, et, pen in to_save:
-                        db.upsert_prediction(tournament_id, participant_id, mid, hg, ag, rk, rk, winner, et, pen, False)
+                    with db.defer_sheets_sync():
+                        for mid, hg, ag, winner, et, pen in to_save:
+                            db.upsert_prediction(tournament_id, participant_id, mid, hg, ag, rk, rk, winner, et, pen, False)
                     st.success("Predicciones guardadas.")
                     rerun()
 
@@ -1091,9 +1095,10 @@ def render_initial_bracket(tournament_id: int, participant_id: int, teams: pd.Da
         if len(pairings) != 16:
             st.error("No se pudo generar R32: faltan clasificados.")
         else:
-            db.clear_bracket_round(tournament_id, participant_id, "initial", "ronda32")
-            for i, (h, a) in enumerate(pairings, start=1):
-                db.upsert_bracket_prediction(tournament_id, participant_id, "initial", "ronda32", i, h, a)
+            with db.defer_sheets_sync():
+                db.clear_bracket_round(tournament_id, participant_id, "initial", "ronda32")
+                for i, (h, a) in enumerate(pairings, start=1):
+                    db.upsert_bracket_prediction(tournament_id, participant_id, "initial", "ronda32", i, h, a)
             st.success("Ronda de 32 inicial generada.")
             rerun()
     bracket = load_bracket_predictions(tournament_id)
@@ -1114,6 +1119,7 @@ def render_initial_bracket(tournament_id: int, participant_id: int, teams: pd.Da
         c1, c2 = st.columns(2)
         if c1.button(f"Guardar {get_round_name(rk)} inicial", disabled=locked, key=f"save_initial_br_{rk}"):
             errors = []
+            valid_rows = []
             for bid, slot, home_id, away_id, hg, ag, winner, et, pen in to_save:
                 if hg is None or ag is None:
                     errors.append(f"Slot {slot}: debes introducir marcador.")
@@ -1122,10 +1128,13 @@ def render_initial_bracket(tournament_id: int, participant_id: int, teams: pd.Da
                 elif (not pen) and hg == ag:
                     errors.append(f"Slot {slot}: empate sin penaltis.")
                 else:
-                    db.upsert_bracket_prediction(tournament_id, participant_id, "initial", rk, slot, home_id, away_id, int(hg), int(ag), winner, et, pen)
+                    valid_rows.append((slot, home_id, away_id, int(hg), int(ag), winner, et, pen))
             if errors:
                 st.error("\n".join(errors))
             else:
+                with db.defer_sheets_sync():
+                    for slot, home_id, away_id, hg, ag, winner, et, pen in valid_rows:
+                        db.upsert_bracket_prediction(tournament_id, participant_id, "initial", rk, slot, home_id, away_id, hg, ag, winner, et, pen)
                 st.success("Cuadro guardado.")
                 rerun()
         if rk in NEXT_ROUND and c2.button(f"Generar {get_round_name(NEXT_ROUND[rk])} inicial", disabled=locked, key=f"gen_next_initial_{rk}"):
@@ -1140,10 +1149,11 @@ def render_initial_bracket(tournament_id: int, participant_id: int, teams: pd.Da
                 existing_next = existing_next[(existing_next["participant_id"] == participant_id) & (existing_next["scope"] == "initial") & (existing_next["round_key"] == nr)]
                 if not existing_next.empty:
                     st.warning(f"Ya existía {get_round_name(nr)} inicial. Se reemplaza por los ganadores actuales.")
-                db.clear_bracket_round(tournament_id, participant_id, "initial", nr)
-                for i in range(0, len(winners), 2):
-                    if i + 1 < len(winners):
-                        db.upsert_bracket_prediction(tournament_id, participant_id, "initial", nr, i//2 + 1, winners[i], winners[i + 1])
+                with db.defer_sheets_sync():
+                    db.clear_bracket_round(tournament_id, participant_id, "initial", nr)
+                    for i in range(0, len(winners), 2):
+                        if i + 1 < len(winners):
+                            db.upsert_bracket_prediction(tournament_id, participant_id, "initial", nr, i//2 + 1, winners[i], winners[i + 1])
                 st.success(f"{get_round_name(nr)} inicial generado.")
                 rerun()
 
@@ -1173,8 +1183,9 @@ def render_predictions(tournament_id: int, participant_id: int) -> None:
             if is_round_locked(tournament_id, "grupos"):
                 st.error("No se puede guardar: ronda cerrada.")
             else:
-                for mid, hg, ag, winner, et, pen in to_save:
-                    db.upsert_prediction(tournament_id, participant_id, mid, hg, ag, "initial", "grupos", winner, et, pen, True)
+                with db.defer_sheets_sync():
+                    for mid, hg, ag, winner, et, pen in to_save:
+                        db.upsert_prediction(tournament_id, participant_id, mid, hg, ag, "initial", "grupos", winner, et, pen, True)
                 st.success("Predicciones guardadas.")
                 rerun()
         st.divider()
@@ -1192,6 +1203,7 @@ def render_predictions(tournament_id: int, participant_id: int) -> None:
             to_save = [render_prediction_match(m, participant_id, tournament_id, rk, locked, teams) for _, m in rk_matches.iterrows()]
             if st.button(f"Guardar {get_round_name(rk)}", type="primary", disabled=locked, key=f"save_preds_final_{rk}"):
                 errors = []
+                valid_rows = []
                 for mid, hg, ag, winner, et, pen in to_save:
                     if hg is None or ag is None:
                         errors.append(f"Partido #{mid}: debes introducir marcador.")
@@ -1200,10 +1212,13 @@ def render_predictions(tournament_id: int, participant_id: int) -> None:
                     elif not pen and hg == ag:
                         errors.append(f"Partido #{mid}: empate sin penaltis.")
                     else:
-                        db.upsert_prediction(tournament_id, participant_id, mid, int(hg), int(ag), rk, rk, winner, et, pen, False)
+                        valid_rows.append((mid, int(hg), int(ag), winner, et, pen))
                 if errors:
                     st.error("\n".join(errors))
                 else:
+                    with db.defer_sheets_sync():
+                        for mid, hg, ag, winner, et, pen in valid_rows:
+                            db.upsert_prediction(tournament_id, participant_id, mid, hg, ag, rk, rk, winner, et, pen, False)
                     st.success("Predicciones guardadas.")
                     rerun()
     with tabs[6]:
@@ -1221,8 +1236,9 @@ def render_player_extras(tournament_id: int, participant_id: int) -> None:
     for key, label in EXTRA_ITEMS:
         inputs[key] = st.text_input(label, value=values.get(key, ""), key=f"extra_pred_{key}", disabled=locked)
     if st.button("Guardar extras", type="primary", disabled=locked, key="save_player_extras"):
-        for key, value in inputs.items():
-            db.upsert_extra_prediction(tournament_id, participant_id, key, value)
+        with db.defer_sheets_sync():
+            for key, value in inputs.items():
+                db.upsert_extra_prediction(tournament_id, participant_id, key, value)
         st.success("Extras guardados.")
         rerun()
 
@@ -1256,8 +1272,9 @@ def render_admin_extras(tournament_id: int) -> None:
                 ok = c2.checkbox("Acertó", value=current, key=f"extra_val_{pid}_{key}")
                 changes.append((pid, key, ok))
     if st.button("Guardar validación de extras", type="primary"):
-        for pid, key, ok in changes:
-            db.set_extra_validation(tournament_id, pid, key, ok)
+        with db.defer_sheets_sync():
+            for pid, key, ok in changes:
+                db.set_extra_validation(tournament_id, pid, key, ok)
         st.success("Validación guardada.")
         rerun()
 
