@@ -4,7 +4,7 @@ The groups below are a working draft taken from the user's planning notes.
 Review against the official FIFA fixture before production use.
 """
 
-DEFAULT_TOURNAMENT_CODE = "MARTINOTES"
+DEFAULT_TOURNAMENT_CODE = "PORRA_MARTINOTES"
 DEFAULT_ADMIN_PIN = "9999"
 
 GROUPS = {
