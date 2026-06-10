@@ -1,43 +1,60 @@
-"""Seed data for Porra Martinotes.
-
-The groups below are a working draft taken from the user's planning notes.
-Review against the official FIFA fixture before production use.
-"""
-
-DEFAULT_TOURNAMENT_CODE = "PORRA_MARTINOTES"
+DEFAULT_TOURNAMENT_CODE = "MARTINOTES"
 DEFAULT_ADMIN_PIN = "9999"
 
 GROUPS = {
-    "A": ["México", "Sudáfrica", "Corea del Sur", "Chequia"],
-    "B": ["Canadá", "Bosnia y Herzegovina", "Catar", "Suiza"],
-    "C": ["Brasil", "Marruecos", "Haití", "Escocia"],
-    "D": ["Estados Unidos", "Paraguay", "Australia", "Turquía"],
-    "E": ["Alemania", "Curazao", "Costa de Marfil", "Ecuador"],
-    "F": ["Países Bajos", "Japón", "Suecia", "Túnez"],
-    "G": ["Bélgica", "Egipto", "Irán", "Nueva Zelanda"],
-    "H": ["España", "Cabo Verde", "Arabia Saudita", "Uruguay"],
-    "I": ["Francia", "Senegal", "Irak", "Noruega"],
-    "J": ["Argentina", "Argelia", "Austria", "Jordania"],
-    "K": ["Portugal", "RD Congo", "Uzbekistán", "Colombia"],
-    "L": ["Inglaterra", "Croacia", "Ghana", "Panamá"],
+    "A": ["MEX", "RSA", "KOR", "CZE"],
+    "B": ["CAN", "BIH", "QAT", "SUI"],
+    "C": ["BRA", "MAR", "HAI", "SCO"],
+    "D": ["USA", "PAR", "AUS", "TUR"],
+    "E": ["GER", "CUW", "CIV", "ECU"],
+    "F": ["NED", "JPN", "SWE", "TUN"],
+    "G": ["BEL", "EGY", "IRN", "NZE"],
+    "H": ["ESP", "CPV", "KSA", "URU"],
+    "I": ["FRA", "SEN", "IRQ", "NOR"],
+    "J": ["ARG", "ALG", "AUT", "JOR"],
+    "K": ["POR", "COD", "UZB", "COL"],
+    "L": ["ENG", "CRO", "GHA", "PAN"],
 }
 
-# Generic 4-team group schedule: each team plays all others once.
-# Jornada 1: 1v2, 3v4; Jornada 2: 1v3, 2v4; Jornada 3: 1v4, 2v3.
-GENERIC_GROUP_PAIRINGS = [
-    (1, 0, 1),
-    (1, 2, 3),
-    (2, 0, 2),
-    (2, 1, 3),
-    (3, 0, 3),
-    (3, 1, 2),
-]
+ROUND_KEYS = ["grupos", "ronda32", "octavos", "cuartos", "semifinales", "final"]
+ROUND_NAMES = {
+    "grupos": "Fase de grupos",
+    "ronda32": "Ronda de 32",
+    "octavos": "Octavos",
+    "cuartos": "Cuartos",
+    "semifinales": "Semifinales",
+    "final": "Final",
+}
 
-DEFAULT_ROUNDS = [
-    ("grupos", "Fase de grupos", "open", "2026-06-11 18:00"),
-    ("ronda32", "Ronda de 32", "pending", "2026-06-28 16:00"),
-    ("octavos", "Octavos", "pending", "2026-07-04 16:00"),
-    ("cuartos", "Cuartos", "pending", "2026-07-09 16:00"),
-    ("semifinales", "Semifinales", "pending", "2026-07-14 16:00"),
-    ("final", "Final", "pending", "2026-07-19 16:00"),
-]
+DEFAULT_RULES = {
+    "base_points": 1000,
+    "global_groups_weight": 40,
+    "global_knockout_weight": 50,
+    "global_extras_weight": 10,
+    "group_positions_weight": 70,
+    "group_sign_weight": 25,
+    "group_exact_weight": 5,
+    "knockout_qualifier_weight": 70,
+    "knockout_result_weight": 30,
+    "bonus_octavos": 1,
+    "bonus_cuartos": 3,
+    "bonus_semifinales": 6,
+    "bonus_final": 12,
+    "bonus_campeon": 25,
+    "extra_balon_oro": 25,
+    "extra_bota_oro": 15,
+    "extra_guante_oro": 15,
+    "extra_mejor_joven": 15,
+    "extra_equipo_entretenido": 15,
+    "extra_gol_torneo": 15,
+}
+
+EXTRA_FIELDS = {
+    "campeon": "Campeón",
+    "balon_oro": "Balón de Oro",
+    "bota_oro": "Bota de Oro",
+    "guante_oro": "Guante de Oro",
+    "mejor_joven": "Mejor joven",
+    "equipo_entretenido": "Equipo más entretenido",
+    "gol_torneo": "Gol del torneo",
+}
