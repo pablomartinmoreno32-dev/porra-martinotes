@@ -233,19 +233,48 @@ def render_predictions(tournament_id: int, participant_id: int):
                     render_prediction_block(tournament_id, int(r["id"]), rk, rk, False, f"view_{rk}_{int(r['id'])}")
 
 
+def render_extra_predictions_readonly(tournament_id: int, participant_id: int):
+    rows = db.query_df(
+        "SELECT * FROM extra_predictions WHERE tournament_id=? AND participant_id=?",
+        [tournament_id, participant_id],
+    )
+    current = {r["field_key"]: r["prediction_text"] for _, r in rows.iterrows()} if not rows.empty else {}
+    for k, label in EXTRA_FIELDS.items():
+        st.write(f"**{label}:** {str(current.get(k, '') or '—')}")
+
+
+def render_extra_predictions_editable(tournament_id: int, participant_id: int):
+    rows = db.query_df(
+        "SELECT * FROM extra_predictions WHERE tournament_id=? AND participant_id=?",
+        [tournament_id, participant_id],
+    )
+    current = {r["field_key"]: r["prediction_text"] for _, r in rows.iterrows()} if not rows.empty else {}
+    with st.form("extras_form"):
+        values = {
+            k: st.text_input(label, value=str(current.get(k, "") or ""), key=f"extra_my_{participant_id}_{k}")
+            for k, label in EXTRA_FIELDS.items()
+        }
+        if st.form_submit_button("Guardar extras", type="primary"):
+            with db.defer_sheets_sync():
+                for k, v in values.items():
+                    db.upsert_extra_prediction(tournament_id, participant_id, k, v)
+            st.success("Extras guardados.")
+            rerun()
+
+
 def render_extras(tournament_id: int, participant_id: int, admin: bool = False):
     st.subheader("Extras")
     if not admin:
-        rows = db.query_df("SELECT * FROM extra_predictions WHERE tournament_id=? AND participant_id=?", [tournament_id, participant_id])
-        current = {r["field_key"]: r["prediction_text"] for _, r in rows.iterrows()}
-        with st.form("extras_form"):
-            values = {k: st.text_input(label, value=str(current.get(k, "") or "")) for k, label in EXTRA_FIELDS.items()}
-            if st.form_submit_button("Guardar extras", type="primary"):
-                with db.defer_sheets_sync():
-                    for k, v in values.items():
-                        db.upsert_extra_prediction(tournament_id, participant_id, k, v)
-                st.success("Extras guardados.")
-                rerun()
+        participants = load_participants(tournament_id)
+        others = participants[participants["id"] != participant_id]
+        labels = ["Mis extras"] + [str(r["name"]) for _, r in others.iterrows()]
+        tabs = st.tabs(labels)
+        with tabs[0]:
+            render_extra_predictions_editable(tournament_id, participant_id)
+        for tab, (_, r) in zip(tabs[1:], others.iterrows()):
+            with tab:
+                st.caption("Solo lectura")
+                render_extra_predictions_readonly(tournament_id, int(r["id"]))
     else:
         participants = load_participants(tournament_id)
         preds = db.query_df("SELECT ep.*, p.name FROM extra_predictions ep JOIN participants p ON p.id=ep.participant_id WHERE ep.tournament_id=? ORDER BY p.name, ep.field_key", [tournament_id])
