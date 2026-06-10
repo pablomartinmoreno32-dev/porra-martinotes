@@ -680,7 +680,29 @@ def get_one(sql: str, params: Iterable[Any] | None = None) -> sqlite3.Row | None
 
 
 def get_tournament_by_code(join_code: str) -> sqlite3.Row | None:
-    return get_one("SELECT * FROM tournaments WHERE UPPER(join_code)=UPPER(?)", [join_code.strip()])
+    clean_code = join_code.strip().upper()
+
+    row = get_one(
+        "SELECT * FROM tournaments WHERE UPPER(join_code)=UPPER(?)",
+        [clean_code],
+    )
+    if row:
+        return row
+
+    # Si el torneo por defecto no existe, lo crea automáticamente.
+    try:
+        from seed_data import DEFAULT_TOURNAMENT_CODE
+
+        if clean_code == DEFAULT_TOURNAMENT_CODE.strip().upper():
+            seed_default_tournament()
+            return get_one(
+                "SELECT * FROM tournaments WHERE UPPER(join_code)=UPPER(?)",
+                [clean_code],
+            )
+    except Exception as exc:
+        print(f"Default tournament auto-seed failed: {type(exc).__name__}: {exc}")
+
+    return None
 
 def create_tournament(name: str, join_code: str, admin_pin: str) -> int:
     clean_join_code = join_code.upper().strip()
