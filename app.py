@@ -200,6 +200,29 @@ def render_prediction_block(tournament_id: int, participant_id: int, scope: str,
                 rerun()
 
 
+def render_initial_predictions_suite(tournament_id: int, participant_id: int, editable: bool, key_prefix: str):
+    """Renderiza la predicción inicial completa: grupos + todo el cuadro disponible.
+
+    Antes solo se mostraba la fase de grupos dentro de la pestaña Inicial.
+    Eso impedía ver las proyecciones iniciales de compañeros para ronda32, octavos,
+    cuartos, semifinales y final. Todas esas predicciones viven con scope='initial',
+    por lo que deben consultarse con ese scope y con el round_key correspondiente.
+    """
+    labels = ["Grupos", "Ronda de 32", "Octavos", "Cuartos", "Semifinales", "Final"]
+    round_keys = ["grupos"] + list(KNOCKOUT_ROUNDS)
+    tabs = st.tabs(labels)
+    for tab, rk in zip(tabs, round_keys):
+        with tab:
+            render_prediction_block(
+                tournament_id=tournament_id,
+                participant_id=participant_id,
+                scope="initial",
+                round_key=rk,
+                editable=editable,
+                key_prefix=f"{key_prefix}_initial_{rk}",
+            )
+
+
 def render_predictions(tournament_id: int, participant_id: int):
     st.subheader("Predicciones")
     participants = load_participants(tournament_id)
@@ -207,19 +230,22 @@ def render_predictions(tournament_id: int, participant_id: int):
     main_tabs = st.tabs(["Inicial", "Ronda de 32", "Octavos", "Cuartos", "Semifinales", "Final"])
 
     with main_tabs[0]:
-        group_matches = load_matches(tournament_id)
-        group_matches = group_matches[group_matches["round_key"] == "grupos"]
+        all_matches = load_matches(tournament_id)
         preds = load_predictions(tournament_id)
-        complete, total = completed_predictions_count(preds[(preds["participant_id"] == participant_id) & (preds["scope"] == "initial")], group_matches)
-        st.progress(0 if total == 0 else complete / total, text=f"Mis predicciones: {complete}/{total} partidos")
+        visible_initial_matches = all_matches[all_matches["round_key"].isin(["grupos"] + list(KNOCKOUT_ROUNDS))]
+        complete, total = completed_predictions_count(
+            preds[(preds["participant_id"] == participant_id) & (preds["scope"] == "initial")],
+            visible_initial_matches,
+        )
+        st.progress(0 if total == 0 else complete / total, text=f"Mi predicción inicial completa: {complete}/{total} partidos")
         labels = ["Mis predicciones"] + [str(r["name"]) for _, r in others.iterrows()]
         tabs = st.tabs(labels)
         with tabs[0]:
-            render_prediction_block(tournament_id, participant_id, "initial", "grupos", True, "my_initial")
+            render_initial_predictions_suite(tournament_id, participant_id, True, "my")
         for tab, (_, r) in zip(tabs[1:], others.iterrows()):
             with tab:
-                st.caption("Solo lectura")
-                render_prediction_block(tournament_id, int(r["id"]), "initial", "grupos", False, f"view_initial_{int(r['id'])}")
+                st.caption("Solo lectura · predicción inicial completa")
+                render_initial_predictions_suite(tournament_id, int(r["id"]), False, f"view_{int(r['id'])}")
 
     for parent_tab, rk in zip(main_tabs[1:], KNOCKOUT_ROUNDS):
         with parent_tab:
