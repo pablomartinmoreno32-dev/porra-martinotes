@@ -407,11 +407,151 @@ def render_rounds_admin(tournament_id: int):
 
 def render_score_rules(tournament_id: int):
     st.subheader("Reglas de puntuación")
+    st.caption("Modelo jerárquico: primero se reparte la base de 1.000 puntos por bloques y después cada bloque se reparte internamente.")
+
     rules = db.get_rules(tournament_id)
+
+    def rv(key: str, default: float = 0.0) -> float:
+        try:
+            return float(rules.get(key, default))
+        except Exception:
+            return float(default)
+
+    base_points = rv("base_points", 1000.0)
+    groups_pct = rv("global_groups_weight", 40.0)
+    knockout_pct = rv("global_knockout_weight", 50.0)
+    extras_pct = rv("global_extras_weight", 10.0)
+
+    groups_pool = base_points * groups_pct / 100.0
+    knockout_pool = base_points * knockout_pct / 100.0
+    extras_pool = base_points * extras_pct / 100.0
+
+    gp_pos = rv("group_positions_weight", 70.0)
+    gp_sign = rv("group_sign_weight", 25.0)
+    gp_exact = rv("group_exact_weight", 5.0)
+    ko_qual = rv("knockout_qualifier_weight", 70.0)
+    ko_result = rv("knockout_result_weight", 30.0)
+
+    st.info(
+        f"Distribución efectiva actual: grupos {groups_pool:.0f} pts, "
+        f"eliminatorias {knockout_pool:.0f} pts, extras {extras_pool:.0f} pts. "
+        f"Total base: {base_points:.0f} pts."
+    )
+
+    values = {}
     with st.form("rules"):
-        values = {}
-        for k, v in rules.items():
-            values[k] = st.number_input(k, value=float(v), step=1.0)
+        st.markdown("### 1. Base total")
+        values["base_points"] = st.number_input(
+            "Puntos base totales",
+            value=base_points,
+            step=50.0,
+            help="Total base de la porra antes de bonus. Normalmente 1.000 puntos.",
+        )
+
+        st.markdown("### 2. Reparto global de la porra")
+        c1, c2, c3 = st.columns(3)
+        values["global_groups_weight"] = c1.number_input(
+            f"Fase de grupos (% del total) → {groups_pool:.0f} pts",
+            value=groups_pct,
+            step=1.0,
+            help="Porcentaje de los puntos base que se reserva para fase de grupos.",
+        )
+        values["global_knockout_weight"] = c2.number_input(
+            f"Eliminatorias (% del total) → {knockout_pool:.0f} pts",
+            value=knockout_pct,
+            step=1.0,
+            help="Porcentaje de los puntos base que se reserva para eliminatorias.",
+        )
+        values["global_extras_weight"] = c3.number_input(
+            f"Extras (% del total) → {extras_pool:.0f} pts",
+            value=extras_pct,
+            step=1.0,
+            help="Porcentaje de los puntos base que se reserva para extras.",
+        )
+
+        total_global = values["global_groups_weight"] + values["global_knockout_weight"] + values["global_extras_weight"]
+        if abs(total_global - 100.0) > 0.001:
+            st.warning(f"El reparto global suma {total_global:.1f}%. Lo normal es que sume 100%.")
+
+        st.markdown("### 3. Reparto interno de fase de grupos")
+        new_groups_pool = values["base_points"] * values["global_groups_weight"] / 100.0
+        c1, c2, c3 = st.columns(3)
+        values["group_positions_weight"] = c1.number_input(
+            f"Posiciones finales (% de grupos) → {new_groups_pool * gp_pos / 100.0:.0f} pts",
+            value=gp_pos,
+            step=1.0,
+            help="Porcentaje del bloque de grupos destinado a acertar posiciones finales de grupo.",
+        )
+        values["group_sign_weight"] = c2.number_input(
+            f"Signo 1X2 (% de grupos) → {new_groups_pool * gp_sign / 100.0:.0f} pts",
+            value=gp_sign,
+            step=1.0,
+            help="Porcentaje del bloque de grupos destinado a acertar ganador/empate del partido.",
+        )
+        values["group_exact_weight"] = c3.number_input(
+            f"Marcador exacto (% de grupos) → {new_groups_pool * gp_exact / 100.0:.0f} pts",
+            value=gp_exact,
+            step=1.0,
+            help="Porcentaje del bloque de grupos destinado a acertar el marcador exacto.",
+        )
+        total_groups = values["group_positions_weight"] + values["group_sign_weight"] + values["group_exact_weight"]
+        if abs(total_groups - 100.0) > 0.001:
+            st.warning(f"El reparto interno de grupos suma {total_groups:.1f}%. Lo normal es que sume 100%.")
+
+        st.markdown("### 4. Reparto interno de eliminatorias")
+        new_knockout_pool = values["base_points"] * values["global_knockout_weight"] / 100.0
+        per_round = new_knockout_pool / max(len(KNOCKOUT_ROUNDS), 1)
+        st.caption(f"Con la configuración actual: {new_knockout_pool:.0f} puntos de eliminatorias / {len(KNOCKOUT_ROUNDS)} rondas = {per_round:.0f} puntos por ronda.")
+        c1, c2 = st.columns(2)
+        values["knockout_qualifier_weight"] = c1.number_input(
+            f"Equipo clasificado (% de cada ronda) → {per_round * ko_qual / 100.0:.0f} pts/ronda",
+            value=ko_qual,
+            step=1.0,
+            help="Porcentaje de cada ronda destinado a acertar quién pasa.",
+        )
+        values["knockout_result_weight"] = c2.number_input(
+            f"Resultado (% de cada ronda) → {per_round * ko_result / 100.0:.0f} pts/ronda",
+            value=ko_result,
+            step=1.0,
+            help="Porcentaje de cada ronda destinado a acertar el resultado/signo.",
+        )
+        total_knockout = values["knockout_qualifier_weight"] + values["knockout_result_weight"]
+        if abs(total_knockout - 100.0) > 0.001:
+            st.warning(f"El reparto interno de eliminatorias suma {total_knockout:.1f}%. Lo normal es que sume 100%.")
+
+        st.markdown("### 5. Extras")
+        st.caption(f"El bloque de extras equivale a {values['base_points'] * values['global_extras_weight'] / 100.0:.0f} puntos. Estos campos son pesos internos/puntos relativos dentro del bloque de extras.")
+        extra_keys = [
+            ("extra_balon_oro", "Balón de Oro"),
+            ("extra_bota_oro", "Bota de Oro"),
+            ("extra_guante_oro", "Guante de Oro"),
+            ("extra_mejor_joven", "Mejor joven"),
+            ("extra_equipo_entretenido", "Equipo más entretenido"),
+            ("extra_gol_torneo", "Gol del torneo"),
+        ]
+        cols = st.columns(3)
+        for i, (key, label) in enumerate(extra_keys):
+            values[key] = cols[i % 3].number_input(label, value=rv(key, 0.0), step=1.0)
+
+        st.markdown("### 6. Bonus fuera de los 1.000 puntos base")
+        bonus_keys = [
+            ("bonus_octavos", "Bonus octavos"),
+            ("bonus_cuartos", "Bonus cuartos"),
+            ("bonus_semifinales", "Bonus semifinales"),
+            ("bonus_final", "Bonus final"),
+            ("bonus_campeon", "Bonus campeón"),
+        ]
+        cols = st.columns(5)
+        for i, (key, label) in enumerate(bonus_keys):
+            values[key] = cols[i].number_input(label, value=rv(key, 0.0), step=1.0)
+
+        known = set(values)
+        other_keys = [k for k in rules.keys() if k not in known]
+        if other_keys:
+            with st.expander("Otras reglas técnicas"):
+                for k in other_keys:
+                    values[k] = st.number_input(k, value=rv(k, 0.0), step=1.0)
+
         if st.form_submit_button("Guardar reglas", type="primary"):
             with db.defer_sheets_sync():
                 for k, v in values.items():
