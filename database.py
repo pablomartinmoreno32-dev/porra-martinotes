@@ -32,6 +32,7 @@ _SHEETS_LOADED = False
 _SYNCING_TO_SHEETS = False
 _DEFER_SHEETS_SYNC = False
 _SHEETS_DIRTY = False
+_SHEETS_DIRTY_TABLES: set[str] = set()
 _GSPREAD_CLIENT = None
 _SPREADSHEET = None
 DEFAULT_RULES: dict[str, float] = {
@@ -398,7 +399,50 @@ def _load_sheets_into_sqlite(conn: sqlite3.Connection) -> None:
             conn.executemany(insert_sql, rows_to_insert)
 
 
-def _sync_sqlite_to_sheets(conn: sqlite3.Connection) -> None:
+def _extract_modified_tables(sql: str) -> set[str]:
+    """Best-effort extraction of tables modified by a simple SQL statement.
+
+    This is intentionally conservative: if the statement is complex and cannot be
+    parsed, the caller can still fall back to a full sync. The goal is to avoid
+    writing every worksheet after every player save.
+    """
+    text = " ".join(str(sql).replace("\n", " ").split())
+    lower = text.lower()
+    tables: set[str] = set()
+
+    patterns = (
+        "insert into ",
+        "insert or replace into ",
+        "insert or ignore into ",
+        "replace into ",
+        "update ",
+        "delete from ",
+    )
+    for pattern in patterns:
+        idx = lower.find(pattern)
+        if idx == -1:
+            continue
+        rest = text[idx + len(pattern):].strip()
+        if not rest:
+            continue
+        table = rest.split()[0].strip('`"[]')
+        table = table.split("(")[0].strip('`"[]')
+        if table in SHEETS_TABLES:
+            tables.add(table)
+    return tables
+
+
+def _set_dirty_tables(tables: set[str] | None = None) -> None:
+    global _SHEETS_DIRTY, _SHEETS_DIRTY_TABLES
+    _SHEETS_DIRTY = True
+    if tables:
+        _SHEETS_DIRTY_TABLES.update(tables)
+    else:
+        # Unknown write path: safest fallback is a full sync.
+        _SHEETS_DIRTY_TABLES.update(SHEETS_TABLES)
+
+
+def _sync_sqlite_to_sheets(conn: sqlite3.Connection, tables: set[str] | None = None) -> None:
     global _SYNCING_TO_SHEETS
     if _SYNCING_TO_SHEETS or not sheets_enabled():
         return
@@ -406,7 +450,9 @@ def _sync_sqlite_to_sheets(conn: sqlite3.Connection) -> None:
     try:
         spreadsheet = _get_spreadsheet()
         worksheets = _worksheet_map(spreadsheet)
-        for table in SHEETS_TABLES:
+        target_tables = [t for t in SHEETS_TABLES if tables is None or t in tables]
+
+        for table in target_tables:
             columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
             if not columns:
                 continue
@@ -417,14 +463,31 @@ def _sync_sqlite_to_sheets(conn: sqlite3.Connection) -> None:
 
             if table in worksheets:
                 ws = worksheets[table]
+                # Clear only the worksheet that really changed. Previously the app
+                # cleared and rewrote every worksheet on every save, which quickly
+                # exhausted the Google Sheets write quota in Streamlit Cloud.
                 ws.clear()
             else:
                 ws = spreadsheet.add_worksheet(title=table, rows=max(len(values), 50), cols=max(len(columns), 10))
-            if values:
-                ws.update(values, "A1", value_input_option="RAW")
+            ws.update(values, "A1", value_input_option="RAW")
     finally:
         _SYNCING_TO_SHEETS = False
 
+
+def _safe_sync_sqlite_to_sheets(conn: sqlite3.Connection, tables: set[str] | None = None) -> bool:
+    """Try to persist SQLite to Google Sheets without crashing the Streamlit run.
+
+    Google Sheets has a strict per-minute write quota. If the quota is hit, the
+    local SQLite write has already succeeded, so the best user experience is to
+    keep the app alive and retry on a later write/reload instead of showing a red
+    exception screen.
+    """
+    try:
+        _sync_sqlite_to_sheets(conn, tables=tables)
+        return True
+    except Exception as exc:
+        print(f"Google Sheets sync skipped: {type(exc).__name__}: {exc}")
+        return False
 
 def _ensure_sheets_loaded() -> None:
     global _SHEETS_LOADED
@@ -446,8 +509,8 @@ def _ensure_sheets_loaded() -> None:
 
 
 @contextmanager
-def get_conn():
-    global _SHEETS_DIRTY
+def get_conn(sync: bool = True):
+    global _SHEETS_DIRTY, _SHEETS_DIRTY_TABLES
     if sheets_enabled():
         _ensure_sheets_loaded()
     conn = sqlite3.connect(_local_db_path())
@@ -458,34 +521,44 @@ def get_conn():
         yield conn
         conn.commit()
         changed = conn.total_changes > changes_before
-        if sheets_enabled() and changed:
+        if sheets_enabled() and changed and sync:
             if _DEFER_SHEETS_SYNC:
-                _SHEETS_DIRTY = True
+                _set_dirty_tables(None)
             else:
-                _sync_sqlite_to_sheets(conn)
+                _safe_sync_sqlite_to_sheets(conn, tables=None)
     finally:
         conn.close()
 
 
 @contextmanager
 def defer_sheets_sync():
-    global _DEFER_SHEETS_SYNC, _SHEETS_DIRTY
+    global _DEFER_SHEETS_SYNC, _SHEETS_DIRTY, _SHEETS_DIRTY_TABLES
     previous_defer = _DEFER_SHEETS_SYNC
     previous_dirty = _SHEETS_DIRTY
+    previous_dirty_tables = set(_SHEETS_DIRTY_TABLES)
     _DEFER_SHEETS_SYNC = True
     _SHEETS_DIRTY = False
+    _SHEETS_DIRTY_TABLES = set()
     try:
         yield
     finally:
-        should_sync = sheets_enabled() and (not previous_defer) and _SHEETS_DIRTY
+        dirty_now = _SHEETS_DIRTY
+        dirty_tables_now = set(_SHEETS_DIRTY_TABLES)
+        should_sync = sheets_enabled() and (not previous_defer) and dirty_now
         _DEFER_SHEETS_SYNC = previous_defer
-        _SHEETS_DIRTY = previous_dirty or (_SHEETS_DIRTY and previous_defer)
+        _SHEETS_DIRTY = previous_dirty or (dirty_now and previous_defer)
+        _SHEETS_DIRTY_TABLES = previous_dirty_tables | (dirty_tables_now if previous_defer else set())
         if should_sync:
             with sqlite3.connect(_local_db_path()) as conn:
                 conn.row_factory = sqlite3.Row
-                _sync_sqlite_to_sheets(conn)
-            _SHEETS_DIRTY = previous_dirty
-
+                ok = _safe_sync_sqlite_to_sheets(conn, tables=dirty_tables_now or None)
+            if ok:
+                _SHEETS_DIRTY = previous_dirty
+                _SHEETS_DIRTY_TABLES = previous_dirty_tables
+            else:
+                # Keep the dirty set in memory so the next write can retry.
+                _SHEETS_DIRTY = True
+                _SHEETS_DIRTY_TABLES = previous_dirty_tables | dirty_tables_now
 
 def init_db() -> None:
     with get_conn() as conn:
@@ -498,13 +571,33 @@ def query_df(sql: str, params: Iterable[Any] | None = None) -> pd.DataFrame:
 
 
 def execute(sql: str, params: Iterable[Any] | None = None) -> None:
-    with get_conn() as conn:
+    with get_conn(sync=False) as conn:
+        changes_before = conn.total_changes
         conn.execute(sql, tuple(params or []))
+        changed = conn.total_changes > changes_before
+    if sheets_enabled() and changed:
+        tables = _extract_modified_tables(sql)
+        if _DEFER_SHEETS_SYNC:
+            _set_dirty_tables(tables or None)
+        else:
+            with sqlite3.connect(_local_db_path()) as conn:
+                conn.row_factory = sqlite3.Row
+                _safe_sync_sqlite_to_sheets(conn, tables=tables or None)
 
 
 def execute_many(sql: str, rows: list[Iterable[Any]]) -> None:
-    with get_conn() as conn:
+    with get_conn(sync=False) as conn:
+        changes_before = conn.total_changes
         conn.executemany(sql, rows)
+        changed = conn.total_changes > changes_before
+    if sheets_enabled() and changed:
+        tables = _extract_modified_tables(sql)
+        if _DEFER_SHEETS_SYNC:
+            _set_dirty_tables(tables or None)
+        else:
+            with sqlite3.connect(_local_db_path()) as conn:
+                conn.row_factory = sqlite3.Row
+                _safe_sync_sqlite_to_sheets(conn, tables=tables or None)
 
 
 def get_one(sql: str, params: Iterable[Any] | None = None) -> sqlite3.Row | None:
