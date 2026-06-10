@@ -7,6 +7,22 @@ BONUS_MILESTONES = {"octavos": "bonus_octavos", "cuartos": "bonus_cuartos", "sem
 EXTRA_KEYS = ["balon_oro", "bota_oro", "guante_oro", "mejor_joven", "equipo_entretenido", "gol_torneo"]
 
 
+def _ensure_columns(df: pd.DataFrame | None, columns: list[str]) -> pd.DataFrame:
+    """Return a DataFrame that always contains the requested columns.
+
+    Streamlit/Sheets can produce empty DataFrames with no columns in early app
+    states. The scoring functions must treat those as empty datasets, not crash
+    with KeyError.
+    """
+    if df is None:
+        df = pd.DataFrame()
+    df = df.copy()
+    for col in columns:
+        if col not in df.columns:
+            df[col] = pd.NA
+    return df
+
+
 def _empty_row(team_id: int, team: str, group: str) -> dict:
     return {
         "team_id": team_id,
@@ -24,7 +40,8 @@ def _empty_row(team_id: int, team: str, group: str) -> dict:
 
 
 def _get_manual_override(overrides_df: pd.DataFrame | None, scope: str, group_letter: str | None, team_id: int) -> int:
-    if overrides_df is None or overrides_df.empty:
+    overrides_df = _ensure_columns(overrides_df, ["scope", "team_id", "group_letter", "manual_order"])
+    if overrides_df.empty:
         return 999
     df = overrides_df[(overrides_df["scope"] == scope) & (overrides_df["team_id"] == team_id)]
     if group_letter is not None:
@@ -39,6 +56,12 @@ def _get_manual_override(overrides_df: pd.DataFrame | None, scope: str, group_le
 
 def _head_to_head_metrics(team_ids: list[int], group_matches: pd.DataFrame) -> dict[int, tuple[int, int, int]]:
     metrics = {tid: {"pts": 0, "gf": 0, "gc": 0} for tid in team_ids}
+    group_matches = _ensure_columns(
+        group_matches,
+        ["home_team_id", "away_team_id", "status", "home_goals", "away_goals"],
+    )
+    if group_matches.empty:
+        return {tid: (0, 0, 0) for tid in team_ids}
     relevant = group_matches[
         group_matches["home_team_id"].isin(team_ids)
         & group_matches["away_team_id"].isin(team_ids)
@@ -84,10 +107,13 @@ def _rank_group(df: pd.DataFrame, group_matches: pd.DataFrame) -> pd.DataFrame:
 
 def compute_group_standings(matches_df: pd.DataFrame, teams_df: pd.DataFrame, overrides_df: pd.DataFrame | None = None) -> pd.DataFrame:
     rows: list[dict] = []
+    teams_df = _ensure_columns(teams_df, ["id", "name", "group_letter"])
+    matches_df = _ensure_columns(
+        matches_df,
+        ["id", "round_key", "group_letter", "status", "home_team_id", "away_team_id", "home_goals", "away_goals"],
+    )
     if teams_df.empty:
         return pd.DataFrame()
-    if matches_df.empty:
-        matches_df = pd.DataFrame(columns=["group_letter", "status", "home_team_id", "away_team_id", "home_goals", "away_goals"])
     for group, group_teams in teams_df.groupby("group_letter", sort=True):
         base = {int(r["id"]): _empty_row(int(r["id"]), str(r["name"]), str(group)) for _, r in group_teams.iterrows()}
         group_matches = matches_df[(matches_df["group_letter"] == group) & (matches_df["status"] == "played")]
@@ -126,7 +152,7 @@ def compute_group_standings(matches_df: pd.DataFrame, teams_df: pd.DataFrame, ov
         return standings
     ordered = []
     for group, df in standings.groupby("Grupo", sort=True):
-        gm = matches_df[matches_df["group_letter"] == group] if not matches_df.empty else pd.DataFrame()
+        gm = matches_df[matches_df["group_letter"] == group]
         ordered.append(_rank_group(df, gm))
     return pd.concat(ordered, ignore_index=True)
 
@@ -161,6 +187,11 @@ def _sign(a: int, b: int) -> int:
 
 
 def _prediction_matches_as_results(matches_df: pd.DataFrame, predictions_df: pd.DataFrame) -> pd.DataFrame:
+    matches_df = _ensure_columns(
+        matches_df,
+        ["id", "round_key", "group_letter", "status", "home_team_id", "away_team_id", "home_goals", "away_goals"],
+    )
+    predictions_df = _ensure_columns(predictions_df, ["match_id", "predicted_home_goals", "predicted_away_goals"])
     if matches_df.empty or predictions_df.empty:
         return matches_df.iloc[0:0].copy()
     pred = predictions_df.dropna(subset=["predicted_home_goals", "predicted_away_goals"]).copy()
@@ -195,6 +226,16 @@ def score_groups_for_participant(
     positions_max = groups_max * _pct(rules.get("group_positions_weight", 70))
     sign_max = groups_max * _pct(rules.get("group_sign_weight", 25))
     exact_max = groups_max * _pct(rules.get("group_exact_weight", 5))
+
+    matches_df = _ensure_columns(
+        matches_df,
+        ["id", "round_key", "group_letter", "status", "home_team_id", "away_team_id", "home_goals", "away_goals"],
+    )
+    predictions_df = _ensure_columns(
+        predictions_df,
+        ["participant_id", "scope", "match_id", "predicted_home_goals", "predicted_away_goals"],
+    )
+    teams_df = _ensure_columns(teams_df, ["id", "name", "group_letter"])
 
     group_matches = matches_df[matches_df["round_key"] == "grupos"].copy()
     real_played = group_matches[group_matches["status"] == "played"].copy()
@@ -295,6 +336,14 @@ def score_knockouts_for_participant(
     et_mult = float(rules.get("extra_time_multiplier", 0.5))
     pen_mult = float(rules.get("penalties_multiplier", 0.5))
 
+    matches_df = _ensure_columns(
+        matches_df,
+        ["id", "round_key", "status", "home_goals", "away_goals", "winner_team_id", "extra_time", "penalties"],
+    )
+    predictions_df = _ensure_columns(
+        predictions_df,
+        ["participant_id", "match_id", "scope", "predicted_home_goals", "predicted_away_goals", "predicted_winner_team_id", "predicted_extra_time", "predicted_penalties"],
+    )
     preds_all = predictions_df[predictions_df["participant_id"] == participant_id].copy()
     total = 0.0
     qualifier_score = 0.0
@@ -346,6 +395,7 @@ def score_knockouts_for_participant(
 
 def _actual_milestones_from_matches(matches_df: pd.DataFrame) -> dict[str, set[int]]:
     milestones = {"octavos": set(), "cuartos": set(), "semifinales": set(), "final": set(), "campeon": set()}
+    matches_df = _ensure_columns(matches_df, ["round_key", "status", "winner_team_id"])
     round_to_milestone = {"ronda32": "octavos", "octavos": "cuartos", "cuartos": "semifinales", "semifinales": "final", "final": "campeon"}
     for rk, milestone in round_to_milestone.items():
         df = matches_df[(matches_df["round_key"] == rk) & (matches_df["status"] == "played")].copy()
@@ -357,7 +407,8 @@ def _actual_milestones_from_matches(matches_df: pd.DataFrame) -> dict[str, set[i
 
 def _initial_milestones_from_bracket(bracket_df: pd.DataFrame, participant_id: int) -> dict[str, set[int]]:
     milestones = {"octavos": set(), "cuartos": set(), "semifinales": set(), "final": set(), "campeon": set()}
-    if bracket_df is None or bracket_df.empty:
+    bracket_df = _ensure_columns(bracket_df, ["participant_id", "scope", "round_key", "predicted_winner_team_id"])
+    if bracket_df.empty:
         return milestones
     df = bracket_df[(bracket_df["participant_id"] == participant_id) & (bracket_df["scope"] == "initial")].copy()
     round_to_milestone = {"ronda32": "octavos", "octavos": "cuartos", "cuartos": "semifinales", "semifinales": "final", "final": "campeon"}
@@ -385,7 +436,8 @@ def score_initial_bonus_for_participant(participant_id: int, matches_df: pd.Data
 def score_extras_for_participant(participant_id: int, validations_df: pd.DataFrame, rules: dict[str, float]) -> dict:
     total = 0.0
     detail = {}
-    if validations_df is None or validations_df.empty:
+    validations_df = _ensure_columns(validations_df, ["participant_id", "extra_key", "is_correct"])
+    if validations_df.empty:
         return {"extras": 0.0, "extras_detail": detail}
     df = validations_df[validations_df["participant_id"] == participant_id]
     for key in EXTRA_KEYS:
@@ -412,6 +464,9 @@ def build_leaderboard(
         bracket_df = pd.DataFrame()
     if extra_validations_df is None:
         extra_validations_df = pd.DataFrame()
+    participants_df = _ensure_columns(participants_df, ["id", "name"])
+    if participants_df.empty:
+        return pd.DataFrame(columns=["Pos", "Jugador", "Puntos", "Grupos", "Eliminatorias", "Extras", "Bonus inicial"]), details
     for _, p in participants_df.iterrows():
         pid = int(p["id"])
         gs = score_groups_for_participant(pid, matches_df, teams_df, predictions_df, overrides_df, rules)
