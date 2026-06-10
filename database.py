@@ -31,6 +31,7 @@ SHEETS_TABLES = [
 _SHEETS_LOADED = False
 _SYNCING_TO_SHEETS = False
 _DEFER_SHEETS_SYNC = False
+_SHEETS_DIRTY = False
 _GSPREAD_CLIENT = None
 _SPREADSHEET = None
 DEFAULT_RULES: dict[str, float] = {
@@ -368,19 +369,31 @@ def _load_sheets_into_sqlite(conn: sqlite3.Connection) -> None:
         type_map = _sqlite_type_map(conn, table)
         placeholders = ", ".join(["?"] * len(headers))
         col_sql = ", ".join(headers)
-        insert_sql = f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders})"
+        insert_sql = f"INSERT OR REPLACE INTO {table} ({col_sql}) VALUES ({placeholders})"
 
         rows_to_insert = []
+        required_not_null = {
+            "tournaments": ["name", "join_code", "admin_pin"],
+            "rounds": ["tournament_id", "round_key", "round_name", "status"],
+            "participants": ["tournament_id", "name", "pin"],
+            "teams": ["tournament_id", "name", "group_letter"],
+            "matches": ["tournament_id", "round_key", "phase", "home_team_id", "away_team_id", "status", "origin"],
+            "predictions": ["tournament_id", "participant_id", "match_id", "scope", "round_key"],
+            "ranking_overrides": ["tournament_id", "scope", "team_id", "manual_order"],
+            "scoring_rules": ["tournament_id", "rule_key", "rule_value"],
+            "bracket_predictions": ["tournament_id", "participant_id", "scope", "round_key", "slot", "home_team_id", "away_team_id"],
+            "extra_predictions": ["tournament_id", "participant_id", "extra_key"],
+            "extra_validations": ["tournament_id", "participant_id", "extra_key", "is_correct"],
+        }
+        required_idx = [headers.index(col) for col in required_not_null.get(table, []) if col in headers]
         for raw_row in values[1:]:
-            row_dict = dict(zip(values[0], raw_row))
+            row_dict = {str(k).strip(): v for k, v in dict(zip(values[0], raw_row)).items()}
             converted = [_convert_cell(row_dict.get(col, ""), type_map.get(col, "TEXT")) for col in headers]
-            if any(v is not None for v in converted):
-                rows_to_insert.append(converted)
-        if table == "scoring_rules":
-            rows_to_insert = [
-                row for row in rows_to_insert
-                if row[2] is not None and row[3] is not None
-            ]
+            if not any(v is not None for v in converted):
+                continue
+            if any(converted[i] is None for i in required_idx):
+                continue
+            rows_to_insert.append(converted)
         if rows_to_insert:
             conn.executemany(insert_sql, rows_to_insert)
 
@@ -434,6 +447,7 @@ def _ensure_sheets_loaded() -> None:
 
 @contextmanager
 def get_conn():
+    global _SHEETS_DIRTY
     if sheets_enabled():
         _ensure_sheets_loaded()
     conn = sqlite3.connect(_local_db_path())
@@ -443,26 +457,34 @@ def get_conn():
     try:
         yield conn
         conn.commit()
-        if sheets_enabled() and conn.total_changes > changes_before and not _DEFER_SHEETS_SYNC:
-            _sync_sqlite_to_sheets(conn)
+        changed = conn.total_changes > changes_before
+        if sheets_enabled() and changed:
+            if _DEFER_SHEETS_SYNC:
+                _SHEETS_DIRTY = True
+            else:
+                _sync_sqlite_to_sheets(conn)
     finally:
         conn.close()
 
 
-
 @contextmanager
 def defer_sheets_sync():
-    global _DEFER_SHEETS_SYNC
-    previous = _DEFER_SHEETS_SYNC
+    global _DEFER_SHEETS_SYNC, _SHEETS_DIRTY
+    previous_defer = _DEFER_SHEETS_SYNC
+    previous_dirty = _SHEETS_DIRTY
     _DEFER_SHEETS_SYNC = True
+    _SHEETS_DIRTY = False
     try:
         yield
     finally:
-        _DEFER_SHEETS_SYNC = previous
-        if sheets_enabled() and not _DEFER_SHEETS_SYNC:
+        should_sync = sheets_enabled() and (not previous_defer) and _SHEETS_DIRTY
+        _DEFER_SHEETS_SYNC = previous_defer
+        _SHEETS_DIRTY = previous_dirty or (_SHEETS_DIRTY and previous_defer)
+        if should_sync:
             with sqlite3.connect(_local_db_path()) as conn:
                 conn.row_factory = sqlite3.Row
                 _sync_sqlite_to_sheets(conn)
+            _SHEETS_DIRTY = previous_dirty
 
 
 def init_db() -> None:
@@ -809,13 +831,28 @@ def seed_default_tournament() -> int:
         existing = get_tournament_by_code(DEFAULT_TOURNAMENT_CODE)
         if existing:
             tournament_id = int(existing["id"])
-            ensure_default_rules(tournament_id)
-            # Migration guard: previous builds seeded r32/semis, while the app uses
-            # ronda32/semifinales everywhere else. Keep the canonical keys aligned
-            # so round locking and filters work consistently.
-            for round_key, round_name, status, lock_datetime in DEFAULT_ROUNDS:
-                upsert_round(tournament_id, round_key, round_name, status, lock_datetime)
-            execute("DELETE FROM rounds WHERE tournament_id=? AND round_key IN ('r32', 'semis')", [tournament_id])
+            # Production guard: do not rewrite Sheets on every page load.
+            # Only insert defaults that are genuinely missing.
+            with get_conn() as conn:
+                for k, v in DEFAULT_RULES.items():
+                    conn.execute(
+                        """
+                        INSERT INTO scoring_rules(tournament_id, rule_key, rule_value)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(tournament_id, rule_key) DO NOTHING
+                        """,
+                        (tournament_id, k, float(v)),
+                    )
+                for round_key, round_name, status, lock_datetime in DEFAULT_ROUNDS:
+                    conn.execute(
+                        """
+                        INSERT INTO rounds(tournament_id, round_key, round_name, status, lock_datetime)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(tournament_id, round_key) DO NOTHING
+                        """,
+                        (tournament_id, round_key, round_name, status, lock_datetime),
+                    )
+                conn.execute("DELETE FROM rounds WHERE tournament_id=? AND round_key IN ('r32', 'semis')", (tournament_id,))
             return tournament_id
 
         tournament_id = create_tournament("Porra Martinotes", DEFAULT_TOURNAMENT_CODE, DEFAULT_ADMIN_PIN)
