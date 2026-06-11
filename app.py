@@ -341,44 +341,105 @@ def render_classifications(tournament_id: int):
 def render_matches_results(tournament_id: int, admin: bool):
     st.subheader("Partidos y resultados")
     matches, teams = load_matches(tournament_id), load_teams(tournament_id)
+
     if admin:
         render_match_management(tournament_id, matches, teams)
         st.divider()
+
     if matches.empty:
         st.info("No hay partidos.")
         return
+
     c1, c2, c3 = st.columns(3)
-    rk = c1.selectbox("Ronda", ["Todos"] + ROUND_KEYS, format_func=lambda x: "Todos" if x == "Todos" else ROUND_NAMES.get(x, x))
-    group = c2.selectbox("Grupo", ["Todos"] + sorted([x for x in matches["group_letter"].dropna().unique().tolist()]))
+    rk = c1.selectbox(
+        "Ronda",
+        ["Todos"] + ROUND_KEYS,
+        format_func=lambda x: "Todos" if x == "Todos" else ROUND_NAMES.get(x, x),
+    )
+    group = c2.selectbox(
+        "Grupo",
+        ["Todos"] + sorted([x for x in matches["group_letter"].dropna().unique().tolist()]),
+    )
     status = c3.selectbox("Estado", ["Todos", "pending", "played"])
+
     df = matches.copy()
-    if rk != "Todos": df = df[df["round_key"] == rk]
-    if group != "Todos": df = df[df["group_letter"] == group]
-    if status != "Todos": df = df[df["status"] == status]
+    if rk != "Todos":
+        df = df[df["round_key"] == rk]
+    if group != "Todos":
+        df = df[df["group_letter"] == group]
+    if status != "Todos":
+        df = df[df["status"] == status]
+
     names = team_options(teams)
     changes = []
+
     for _, m in df.iterrows():
         with st.container(border=True):
-            c1, c2, c3, c4, c5, c6 = st.columns([3, 1, .2, 1, 3, 3])
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 1, .2, 1, 3, 3, 2])
             c1.write(f"**{m['home_team']}**")
             c5.write(f"**{m['away_team']}**")
+
             if admin:
-                hg = c2.number_input("GL", 0, 30, safe_int(m["home_goals"], 0), key=f"real_h_{m['id']}", label_visibility="collapsed")
+                hg = c2.number_input(
+                    "GL",
+                    0,
+                    30,
+                    safe_int(m["home_goals"], 0),
+                    key=f"real_h_{m['id']}",
+                    label_visibility="collapsed",
+                )
                 c3.markdown("### -")
-                ag = c4.number_input("GV", 0, 30, safe_int(m["away_goals"], 0), key=f"real_a_{m['id']}", label_visibility="collapsed")
-                winner = None; et = pen = False
+                ag = c4.number_input(
+                    "GV",
+                    0,
+                    30,
+                    safe_int(m["away_goals"], 0),
+                    key=f"real_a_{m['id']}",
+                    label_visibility="collapsed",
+                )
+
+                current_status = str(m.get("status") or "pending").strip().lower()
+                if current_status not in ["pending", "played"]:
+                    current_status = "pending"
+
+                match_status = c7.selectbox(
+                    "Estado",
+                    ["pending", "played"],
+                    index=["pending", "played"].index(current_status),
+                    format_func=lambda x: "Pendiente" if x == "pending" else "Jugado",
+                    key=f"real_status_{m['id']}",
+                )
+
+                winner = None
+                et = False
+                pen = False
+
                 if m["round_key"] != "grupos":
-                    et = c6.checkbox("Prórroga", bool(m["extra_time"]), key=f"real_et_{m['id']}")
-                    pen = c6.checkbox("Penaltis", bool(m["penalties"]), key=f"real_pen_{m['id']}")
+                    et = c6.checkbox("Prórroga", bool(safe_int(m.get("extra_time"), 0)), key=f"real_et_{m['id']}")
+                    pen = c6.checkbox("Penaltis", bool(safe_int(m.get("penalties"), 0)), key=f"real_pen_{m['id']}")
+
                     ids = [int(m["home_team_id"]), int(m["away_team_id"])]
-                    default_w = safe_int(m["winner_team_id"], ids[0])
-                    winner = c6.selectbox("Pasa", ids, index=ids.index(default_w) if default_w in ids else 0, format_func=lambda x: names.get(x, x), key=f"real_w_{m['id']}")
-                changes.append((int(m["id"]), hg, ag, winner, et, pen))
+                    default_w = safe_int(m.get("winner_team_id"), ids[0])
+                    winner = c6.selectbox(
+                        "Pasa",
+                        ids,
+                        index=ids.index(default_w) if default_w in ids else 0,
+                        format_func=lambda x: names.get(x, x),
+                        key=f"real_w_{m['id']}",
+                    )
+
+                changes.append((int(m["id"]), hg, ag, winner, et, pen, match_status))
+
             else:
-                res = "—" if pd.isna(m["home_goals"]) or pd.isna(m["away_goals"]) else f"{int(m['home_goals'])} - {int(m['away_goals'])}"
+                if str(m.get("status")).strip().lower() != "played" or pd.isna(m["home_goals"]) or pd.isna(m["away_goals"]):
+                    res = "—"
+                else:
+                    res = f"{int(m['home_goals'])} - {int(m['away_goals'])}"
+
                 c2.markdown(f"### {res}")
                 if pd.notna(m.get("winner_team")):
                     c6.caption(f"Pasa: {m['winner_team']}")
+
     if admin and st.button("Guardar todos los resultados visibles", type="primary"):
         with db.defer_sheets_sync():
             for row in changes:
@@ -637,29 +698,45 @@ def render_backup(tournament_id: int):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for table in db.SYNC_TABLES:
-            db.query_df(f"SELECT * FROM {table} WHERE tournament_id=?" if table != "tournaments" else "SELECT * FROM tournaments", [tournament_id] if table != "tournaments" else []).to_excel(writer, sheet_name=table, index=False)
+            db.query_df(
+                f"SELECT * FROM {table} WHERE tournament_id=?" if table != "tournaments" else "SELECT * FROM tournaments",
+                [tournament_id] if table != "tournaments" else [],
+            ).to_excel(writer, sheet_name=table, index=False)
     st.download_button("Descargar backup Excel", output.getvalue(), "backup_porra_martinotes.xlsx")
 
 
 def admin_view(tournament_id: int):
     tabs = st.tabs(["Resultados", "Clasificación deportiva", "Generar rondas", "Rondas", "Extras", "Reglas", "Ranking", "Backup"])
-    with tabs[0]: render_matches_results(tournament_id, True)
-    with tabs[1]: render_classifications(tournament_id)
-    with tabs[2]: render_generate_bracket(tournament_id)
-    with tabs[3]: render_rounds_admin(tournament_id)
-    with tabs[4]: render_extras(tournament_id, 0, True)
-    with tabs[5]: render_score_rules(tournament_id)
-    with tabs[6]: render_leaderboard(tournament_id)
-    with tabs[7]: render_backup(tournament_id)
+    with tabs[0]:
+        render_matches_results(tournament_id, True)
+    with tabs[1]:
+        render_classifications(tournament_id)
+    with tabs[2]:
+        render_generate_bracket(tournament_id)
+    with tabs[3]:
+        render_rounds_admin(tournament_id)
+    with tabs[4]:
+        render_extras(tournament_id, 0, True)
+    with tabs[5]:
+        render_score_rules(tournament_id)
+    with tabs[6]:
+        render_leaderboard(tournament_id)
+    with tabs[7]:
+        render_backup(tournament_id)
 
 
 def player_view(tournament_id: int, participant_id: int):
     tabs = st.tabs(["Predicciones", "Extras", "Clasificación general", "Clasificación grupos", "Resultados"])
-    with tabs[0]: render_predictions(tournament_id, participant_id)
-    with tabs[1]: render_extras(tournament_id, participant_id)
-    with tabs[2]: render_leaderboard(tournament_id)
-    with tabs[3]: render_classifications(tournament_id)
-    with tabs[4]: render_matches_results(tournament_id, False)
+    with tabs[0]:
+        render_predictions(tournament_id, participant_id)
+    with tabs[1]:
+        render_extras(tournament_id, participant_id)
+    with tabs[2]:
+        render_leaderboard(tournament_id)
+    with tabs[3]:
+        render_classifications(tournament_id)
+    with tabs[4]:
+        render_matches_results(tournament_id, False)
 
 
 def main():
