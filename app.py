@@ -200,29 +200,6 @@ def render_prediction_block(tournament_id: int, participant_id: int, scope: str,
                 rerun()
 
 
-def render_initial_predictions_suite(tournament_id: int, participant_id: int, editable: bool, key_prefix: str):
-    """Renderiza la predicción inicial completa: grupos + todo el cuadro disponible.
-
-    Antes solo se mostraba la fase de grupos dentro de la pestaña Inicial.
-    Eso impedía ver las proyecciones iniciales de compañeros para ronda32, octavos,
-    cuartos, semifinales y final. Todas esas predicciones viven con scope='initial',
-    por lo que deben consultarse con ese scope y con el round_key correspondiente.
-    """
-    labels = ["Grupos", "Ronda de 32", "Octavos", "Cuartos", "Semifinales", "Final"]
-    round_keys = ["grupos"] + list(KNOCKOUT_ROUNDS)
-    tabs = st.tabs(labels)
-    for tab, rk in zip(tabs, round_keys):
-        with tab:
-            render_prediction_block(
-                tournament_id=tournament_id,
-                participant_id=participant_id,
-                scope="initial",
-                round_key=rk,
-                editable=editable,
-                key_prefix=f"{key_prefix}_initial_{rk}",
-            )
-
-
 def render_predictions(tournament_id: int, participant_id: int):
     st.subheader("Predicciones")
     participants = load_participants(tournament_id)
@@ -230,22 +207,19 @@ def render_predictions(tournament_id: int, participant_id: int):
     main_tabs = st.tabs(["Inicial", "Ronda de 32", "Octavos", "Cuartos", "Semifinales", "Final"])
 
     with main_tabs[0]:
-        all_matches = load_matches(tournament_id)
+        group_matches = load_matches(tournament_id)
+        group_matches = group_matches[group_matches["round_key"] == "grupos"]
         preds = load_predictions(tournament_id)
-        visible_initial_matches = all_matches[all_matches["round_key"].isin(["grupos"] + list(KNOCKOUT_ROUNDS))]
-        complete, total = completed_predictions_count(
-            preds[(preds["participant_id"] == participant_id) & (preds["scope"] == "initial")],
-            visible_initial_matches,
-        )
-        st.progress(0 if total == 0 else complete / total, text=f"Mi predicción inicial completa: {complete}/{total} partidos")
+        complete, total = completed_predictions_count(preds[(preds["participant_id"] == participant_id) & (preds["scope"] == "initial")], group_matches)
+        st.progress(0 if total == 0 else complete / total, text=f"Mis predicciones: {complete}/{total} partidos")
         labels = ["Mis predicciones"] + [str(r["name"]) for _, r in others.iterrows()]
         tabs = st.tabs(labels)
         with tabs[0]:
-            render_initial_predictions_suite(tournament_id, participant_id, True, "my")
+            render_prediction_block(tournament_id, participant_id, "initial", "grupos", True, "my_initial")
         for tab, (_, r) in zip(tabs[1:], others.iterrows()):
             with tab:
-                st.caption("Solo lectura · predicción inicial completa")
-                render_initial_predictions_suite(tournament_id, int(r["id"]), False, f"view_{int(r['id'])}")
+                st.caption("Solo lectura")
+                render_prediction_block(tournament_id, int(r["id"]), "initial", "grupos", False, f"view_initial_{int(r['id'])}")
 
     for parent_tab, rk in zip(main_tabs[1:], KNOCKOUT_ROUNDS):
         with parent_tab:
@@ -259,48 +233,19 @@ def render_predictions(tournament_id: int, participant_id: int):
                     render_prediction_block(tournament_id, int(r["id"]), rk, rk, False, f"view_{rk}_{int(r['id'])}")
 
 
-def render_extra_predictions_readonly(tournament_id: int, participant_id: int):
-    rows = db.query_df(
-        "SELECT * FROM extra_predictions WHERE tournament_id=? AND participant_id=?",
-        [tournament_id, participant_id],
-    )
-    current = {r["field_key"]: r["prediction_text"] for _, r in rows.iterrows()} if not rows.empty else {}
-    for k, label in EXTRA_FIELDS.items():
-        st.write(f"**{label}:** {str(current.get(k, '') or '—')}")
-
-
-def render_extra_predictions_editable(tournament_id: int, participant_id: int):
-    rows = db.query_df(
-        "SELECT * FROM extra_predictions WHERE tournament_id=? AND participant_id=?",
-        [tournament_id, participant_id],
-    )
-    current = {r["field_key"]: r["prediction_text"] for _, r in rows.iterrows()} if not rows.empty else {}
-    with st.form("extras_form"):
-        values = {
-            k: st.text_input(label, value=str(current.get(k, "") or ""), key=f"extra_my_{participant_id}_{k}")
-            for k, label in EXTRA_FIELDS.items()
-        }
-        if st.form_submit_button("Guardar extras", type="primary"):
-            with db.defer_sheets_sync():
-                for k, v in values.items():
-                    db.upsert_extra_prediction(tournament_id, participant_id, k, v)
-            st.success("Extras guardados.")
-            rerun()
-
-
 def render_extras(tournament_id: int, participant_id: int, admin: bool = False):
     st.subheader("Extras")
     if not admin:
-        participants = load_participants(tournament_id)
-        others = participants[participants["id"] != participant_id]
-        labels = ["Mis extras"] + [str(r["name"]) for _, r in others.iterrows()]
-        tabs = st.tabs(labels)
-        with tabs[0]:
-            render_extra_predictions_editable(tournament_id, participant_id)
-        for tab, (_, r) in zip(tabs[1:], others.iterrows()):
-            with tab:
-                st.caption("Solo lectura")
-                render_extra_predictions_readonly(tournament_id, int(r["id"]))
+        rows = db.query_df("SELECT * FROM extra_predictions WHERE tournament_id=? AND participant_id=?", [tournament_id, participant_id])
+        current = {r["field_key"]: r["prediction_text"] for _, r in rows.iterrows()}
+        with st.form("extras_form"):
+            values = {k: st.text_input(label, value=str(current.get(k, "") or "")) for k, label in EXTRA_FIELDS.items()}
+            if st.form_submit_button("Guardar extras", type="primary"):
+                with db.defer_sheets_sync():
+                    for k, v in values.items():
+                        db.upsert_extra_prediction(tournament_id, participant_id, k, v)
+                st.success("Extras guardados.")
+                rerun()
     else:
         participants = load_participants(tournament_id)
         preds = db.query_df("SELECT ep.*, p.name FROM extra_predictions ep JOIN participants p ON p.id=ep.participant_id WHERE ep.tournament_id=? ORDER BY p.name, ep.field_key", [tournament_id])
@@ -341,105 +286,44 @@ def render_classifications(tournament_id: int):
 def render_matches_results(tournament_id: int, admin: bool):
     st.subheader("Partidos y resultados")
     matches, teams = load_matches(tournament_id), load_teams(tournament_id)
-
     if admin:
         render_match_management(tournament_id, matches, teams)
         st.divider()
-
     if matches.empty:
         st.info("No hay partidos.")
         return
-
     c1, c2, c3 = st.columns(3)
-    rk = c1.selectbox(
-        "Ronda",
-        ["Todos"] + ROUND_KEYS,
-        format_func=lambda x: "Todos" if x == "Todos" else ROUND_NAMES.get(x, x),
-    )
-    group = c2.selectbox(
-        "Grupo",
-        ["Todos"] + sorted([x for x in matches["group_letter"].dropna().unique().tolist()]),
-    )
+    rk = c1.selectbox("Ronda", ["Todos"] + ROUND_KEYS, format_func=lambda x: "Todos" if x == "Todos" else ROUND_NAMES.get(x, x))
+    group = c2.selectbox("Grupo", ["Todos"] + sorted([x for x in matches["group_letter"].dropna().unique().tolist()]))
     status = c3.selectbox("Estado", ["Todos", "pending", "played"])
-
     df = matches.copy()
-    if rk != "Todos":
-        df = df[df["round_key"] == rk]
-    if group != "Todos":
-        df = df[df["group_letter"] == group]
-    if status != "Todos":
-        df = df[df["status"] == status]
-
+    if rk != "Todos": df = df[df["round_key"] == rk]
+    if group != "Todos": df = df[df["group_letter"] == group]
+    if status != "Todos": df = df[df["status"] == status]
     names = team_options(teams)
     changes = []
-
     for _, m in df.iterrows():
         with st.container(border=True):
-            c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 1, .2, 1, 3, 3, 2])
+            c1, c2, c3, c4, c5, c6 = st.columns([3, 1, .2, 1, 3, 3])
             c1.write(f"**{m['home_team']}**")
             c5.write(f"**{m['away_team']}**")
-
             if admin:
-                hg = c2.number_input(
-                    "GL",
-                    0,
-                    30,
-                    safe_int(m["home_goals"], 0),
-                    key=f"real_h_{m['id']}",
-                    label_visibility="collapsed",
-                )
+                hg = c2.number_input("GL", 0, 30, safe_int(m["home_goals"], 0), key=f"real_h_{m['id']}", label_visibility="collapsed")
                 c3.markdown("### -")
-                ag = c4.number_input(
-                    "GV",
-                    0,
-                    30,
-                    safe_int(m["away_goals"], 0),
-                    key=f"real_a_{m['id']}",
-                    label_visibility="collapsed",
-                )
-
-                current_status = str(m.get("status") or "pending").strip().lower()
-                if current_status not in ["pending", "played"]:
-                    current_status = "pending"
-
-                match_status = c7.selectbox(
-                    "Estado",
-                    ["pending", "played"],
-                    index=["pending", "played"].index(current_status),
-                    format_func=lambda x: "Pendiente" if x == "pending" else "Jugado",
-                    key=f"real_status_{m['id']}",
-                )
-
-                winner = None
-                et = False
-                pen = False
-
+                ag = c4.number_input("GV", 0, 30, safe_int(m["away_goals"], 0), key=f"real_a_{m['id']}", label_visibility="collapsed")
+                winner = None; et = pen = False
                 if m["round_key"] != "grupos":
-                    et = c6.checkbox("Prórroga", bool(safe_int(m.get("extra_time"), 0)), key=f"real_et_{m['id']}")
-                    pen = c6.checkbox("Penaltis", bool(safe_int(m.get("penalties"), 0)), key=f"real_pen_{m['id']}")
-
+                    et = c6.checkbox("Prórroga", bool(m["extra_time"]), key=f"real_et_{m['id']}")
+                    pen = c6.checkbox("Penaltis", bool(m["penalties"]), key=f"real_pen_{m['id']}")
                     ids = [int(m["home_team_id"]), int(m["away_team_id"])]
-                    default_w = safe_int(m.get("winner_team_id"), ids[0])
-                    winner = c6.selectbox(
-                        "Pasa",
-                        ids,
-                        index=ids.index(default_w) if default_w in ids else 0,
-                        format_func=lambda x: names.get(x, x),
-                        key=f"real_w_{m['id']}",
-                    )
-
-                changes.append((int(m["id"]), hg, ag, winner, et, pen, match_status))
-
+                    default_w = safe_int(m["winner_team_id"], ids[0])
+                    winner = c6.selectbox("Pasa", ids, index=ids.index(default_w) if default_w in ids else 0, format_func=lambda x: names.get(x, x), key=f"real_w_{m['id']}")
+                changes.append((int(m["id"]), hg, ag, winner, et, pen))
             else:
-                if str(m.get("status")).strip().lower() != "played" or pd.isna(m["home_goals"]) or pd.isna(m["away_goals"]):
-                    res = "—"
-                else:
-                    res = f"{int(m['home_goals'])} - {int(m['away_goals'])}"
-
+                res = "—" if pd.isna(m["home_goals"]) or pd.isna(m["away_goals"]) else f"{int(m['home_goals'])} - {int(m['away_goals'])}"
                 c2.markdown(f"### {res}")
                 if pd.notna(m.get("winner_team")):
                     c6.caption(f"Pasa: {m['winner_team']}")
-
     if admin and st.button("Guardar todos los resultados visibles", type="primary"):
         with db.defer_sheets_sync():
             for row in changes:
@@ -494,151 +378,11 @@ def render_rounds_admin(tournament_id: int):
 
 def render_score_rules(tournament_id: int):
     st.subheader("Reglas de puntuación")
-    st.caption("Modelo jerárquico: primero se reparte la base de 1.000 puntos por bloques y después cada bloque se reparte internamente.")
-
     rules = db.get_rules(tournament_id)
-
-    def rv(key: str, default: float = 0.0) -> float:
-        try:
-            return float(rules.get(key, default))
-        except Exception:
-            return float(default)
-
-    base_points = rv("base_points", 1000.0)
-    groups_pct = rv("global_groups_weight", 40.0)
-    knockout_pct = rv("global_knockout_weight", 50.0)
-    extras_pct = rv("global_extras_weight", 10.0)
-
-    groups_pool = base_points * groups_pct / 100.0
-    knockout_pool = base_points * knockout_pct / 100.0
-    extras_pool = base_points * extras_pct / 100.0
-
-    gp_pos = rv("group_positions_weight", 70.0)
-    gp_sign = rv("group_sign_weight", 25.0)
-    gp_exact = rv("group_exact_weight", 5.0)
-    ko_qual = rv("knockout_qualifier_weight", 70.0)
-    ko_result = rv("knockout_result_weight", 30.0)
-
-    st.info(
-        f"Distribución efectiva actual: grupos {groups_pool:.0f} pts, "
-        f"eliminatorias {knockout_pool:.0f} pts, extras {extras_pool:.0f} pts. "
-        f"Total base: {base_points:.0f} pts."
-    )
-
-    values = {}
     with st.form("rules"):
-        st.markdown("### 1. Base total")
-        values["base_points"] = st.number_input(
-            "Puntos base totales",
-            value=base_points,
-            step=50.0,
-            help="Total base de la porra antes de bonus. Normalmente 1.000 puntos.",
-        )
-
-        st.markdown("### 2. Reparto global de la porra")
-        c1, c2, c3 = st.columns(3)
-        values["global_groups_weight"] = c1.number_input(
-            f"Fase de grupos (% del total) → {groups_pool:.0f} pts",
-            value=groups_pct,
-            step=1.0,
-            help="Porcentaje de los puntos base que se reserva para fase de grupos.",
-        )
-        values["global_knockout_weight"] = c2.number_input(
-            f"Eliminatorias (% del total) → {knockout_pool:.0f} pts",
-            value=knockout_pct,
-            step=1.0,
-            help="Porcentaje de los puntos base que se reserva para eliminatorias.",
-        )
-        values["global_extras_weight"] = c3.number_input(
-            f"Extras (% del total) → {extras_pool:.0f} pts",
-            value=extras_pct,
-            step=1.0,
-            help="Porcentaje de los puntos base que se reserva para extras.",
-        )
-
-        total_global = values["global_groups_weight"] + values["global_knockout_weight"] + values["global_extras_weight"]
-        if abs(total_global - 100.0) > 0.001:
-            st.warning(f"El reparto global suma {total_global:.1f}%. Lo normal es que sume 100%.")
-
-        st.markdown("### 3. Reparto interno de fase de grupos")
-        new_groups_pool = values["base_points"] * values["global_groups_weight"] / 100.0
-        c1, c2, c3 = st.columns(3)
-        values["group_positions_weight"] = c1.number_input(
-            f"Posiciones finales (% de grupos) → {new_groups_pool * gp_pos / 100.0:.0f} pts",
-            value=gp_pos,
-            step=1.0,
-            help="Porcentaje del bloque de grupos destinado a acertar posiciones finales de grupo.",
-        )
-        values["group_sign_weight"] = c2.number_input(
-            f"Signo 1X2 (% de grupos) → {new_groups_pool * gp_sign / 100.0:.0f} pts",
-            value=gp_sign,
-            step=1.0,
-            help="Porcentaje del bloque de grupos destinado a acertar ganador/empate del partido.",
-        )
-        values["group_exact_weight"] = c3.number_input(
-            f"Marcador exacto (% de grupos) → {new_groups_pool * gp_exact / 100.0:.0f} pts",
-            value=gp_exact,
-            step=1.0,
-            help="Porcentaje del bloque de grupos destinado a acertar el marcador exacto.",
-        )
-        total_groups = values["group_positions_weight"] + values["group_sign_weight"] + values["group_exact_weight"]
-        if abs(total_groups - 100.0) > 0.001:
-            st.warning(f"El reparto interno de grupos suma {total_groups:.1f}%. Lo normal es que sume 100%.")
-
-        st.markdown("### 4. Reparto interno de eliminatorias")
-        new_knockout_pool = values["base_points"] * values["global_knockout_weight"] / 100.0
-        per_round = new_knockout_pool / max(len(KNOCKOUT_ROUNDS), 1)
-        st.caption(f"Con la configuración actual: {new_knockout_pool:.0f} puntos de eliminatorias / {len(KNOCKOUT_ROUNDS)} rondas = {per_round:.0f} puntos por ronda.")
-        c1, c2 = st.columns(2)
-        values["knockout_qualifier_weight"] = c1.number_input(
-            f"Equipo clasificado (% de cada ronda) → {per_round * ko_qual / 100.0:.0f} pts/ronda",
-            value=ko_qual,
-            step=1.0,
-            help="Porcentaje de cada ronda destinado a acertar quién pasa.",
-        )
-        values["knockout_result_weight"] = c2.number_input(
-            f"Resultado (% de cada ronda) → {per_round * ko_result / 100.0:.0f} pts/ronda",
-            value=ko_result,
-            step=1.0,
-            help="Porcentaje de cada ronda destinado a acertar el resultado/signo.",
-        )
-        total_knockout = values["knockout_qualifier_weight"] + values["knockout_result_weight"]
-        if abs(total_knockout - 100.0) > 0.001:
-            st.warning(f"El reparto interno de eliminatorias suma {total_knockout:.1f}%. Lo normal es que sume 100%.")
-
-        st.markdown("### 5. Extras")
-        st.caption(f"El bloque de extras equivale a {values['base_points'] * values['global_extras_weight'] / 100.0:.0f} puntos. Estos campos son pesos internos/puntos relativos dentro del bloque de extras.")
-        extra_keys = [
-            ("extra_balon_oro", "Balón de Oro"),
-            ("extra_bota_oro", "Bota de Oro"),
-            ("extra_guante_oro", "Guante de Oro"),
-            ("extra_mejor_joven", "Mejor joven"),
-            ("extra_equipo_entretenido", "Equipo más entretenido"),
-            ("extra_gol_torneo", "Gol del torneo"),
-        ]
-        cols = st.columns(3)
-        for i, (key, label) in enumerate(extra_keys):
-            values[key] = cols[i % 3].number_input(label, value=rv(key, 0.0), step=1.0)
-
-        st.markdown("### 6. Bonus fuera de los 1.000 puntos base")
-        bonus_keys = [
-            ("bonus_octavos", "Bonus octavos"),
-            ("bonus_cuartos", "Bonus cuartos"),
-            ("bonus_semifinales", "Bonus semifinales"),
-            ("bonus_final", "Bonus final"),
-            ("bonus_campeon", "Bonus campeón"),
-        ]
-        cols = st.columns(5)
-        for i, (key, label) in enumerate(bonus_keys):
-            values[key] = cols[i].number_input(label, value=rv(key, 0.0), step=1.0)
-
-        known = set(values)
-        other_keys = [k for k in rules.keys() if k not in known]
-        if other_keys:
-            with st.expander("Otras reglas técnicas"):
-                for k in other_keys:
-                    values[k] = st.number_input(k, value=rv(k, 0.0), step=1.0)
-
+        values = {}
+        for k, v in rules.items():
+            values[k] = st.number_input(k, value=float(v), step=1.0)
         if st.form_submit_button("Guardar reglas", type="primary"):
             with db.defer_sheets_sync():
                 for k, v in values.items():
@@ -698,45 +442,29 @@ def render_backup(tournament_id: int):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for table in db.SYNC_TABLES:
-            db.query_df(
-                f"SELECT * FROM {table} WHERE tournament_id=?" if table != "tournaments" else "SELECT * FROM tournaments",
-                [tournament_id] if table != "tournaments" else [],
-            ).to_excel(writer, sheet_name=table, index=False)
+            db.query_df(f"SELECT * FROM {table} WHERE tournament_id=?" if table != "tournaments" else "SELECT * FROM tournaments", [tournament_id] if table != "tournaments" else []).to_excel(writer, sheet_name=table, index=False)
     st.download_button("Descargar backup Excel", output.getvalue(), "backup_porra_martinotes.xlsx")
 
 
 def admin_view(tournament_id: int):
     tabs = st.tabs(["Resultados", "Clasificación deportiva", "Generar rondas", "Rondas", "Extras", "Reglas", "Ranking", "Backup"])
-    with tabs[0]:
-        render_matches_results(tournament_id, True)
-    with tabs[1]:
-        render_classifications(tournament_id)
-    with tabs[2]:
-        render_generate_bracket(tournament_id)
-    with tabs[3]:
-        render_rounds_admin(tournament_id)
-    with tabs[4]:
-        render_extras(tournament_id, 0, True)
-    with tabs[5]:
-        render_score_rules(tournament_id)
-    with tabs[6]:
-        render_leaderboard(tournament_id)
-    with tabs[7]:
-        render_backup(tournament_id)
+    with tabs[0]: render_matches_results(tournament_id, True)
+    with tabs[1]: render_classifications(tournament_id)
+    with tabs[2]: render_generate_bracket(tournament_id)
+    with tabs[3]: render_rounds_admin(tournament_id)
+    with tabs[4]: render_extras(tournament_id, 0, True)
+    with tabs[5]: render_score_rules(tournament_id)
+    with tabs[6]: render_leaderboard(tournament_id)
+    with tabs[7]: render_backup(tournament_id)
 
 
 def player_view(tournament_id: int, participant_id: int):
     tabs = st.tabs(["Predicciones", "Extras", "Clasificación general", "Clasificación grupos", "Resultados"])
-    with tabs[0]:
-        render_predictions(tournament_id, participant_id)
-    with tabs[1]:
-        render_extras(tournament_id, participant_id)
-    with tabs[2]:
-        render_leaderboard(tournament_id)
-    with tabs[3]:
-        render_classifications(tournament_id)
-    with tabs[4]:
-        render_matches_results(tournament_id, False)
+    with tabs[0]: render_predictions(tournament_id, participant_id)
+    with tabs[1]: render_extras(tournament_id, participant_id)
+    with tabs[2]: render_leaderboard(tournament_id)
+    with tabs[3]: render_classifications(tournament_id)
+    with tabs[4]: render_matches_results(tournament_id, False)
 
 
 def main():
