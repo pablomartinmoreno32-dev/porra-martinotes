@@ -14,7 +14,7 @@ from seed_data import DEFAULT_ADMIN_PIN, DEFAULT_RULES, DEFAULT_TOURNAMENT_CODE,
 DB_PATH = Path("porra_martinotes.sqlite3")
 SYNC_TABLES = [
     "tournaments", "rounds", "participants", "teams", "matches", "predictions",
-    "ranking_overrides", "scoring_rules", "extra_predictions", "extra_validations",
+    "initial_bracket_matches", "ranking_overrides", "scoring_rules", "extra_predictions", "extra_validations",
 ]
 
 _SYNC_DISABLED = False
@@ -142,6 +142,19 @@ def init_db() -> None:
                 is_initial INTEGER DEFAULT 0,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(tournament_id, participant_id, match_id, scope)
+            );
+            CREATE TABLE IF NOT EXISTS initial_bracket_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tournament_id INTEGER NOT NULL,
+                participant_id INTEGER NOT NULL,
+                round_key TEXT NOT NULL,
+                bracket_slot TEXT NOT NULL,
+                home_team_id INTEGER NOT NULL,
+                away_team_id INTEGER NOT NULL,
+                origin TEXT DEFAULT 'player_initial',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(tournament_id, participant_id, round_key, bracket_slot)
             );
             CREATE TABLE IF NOT EXISTS ranking_overrides (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -272,25 +285,53 @@ def delete_match(match_id: int, tournament_id: int) -> None:
     execute("DELETE FROM matches WHERE id=? AND tournament_id=?", [match_id, tournament_id])
 
 
-def update_match_result(match_id: int, home_goals: int | None, away_goals: int | None, winner_team_id: int | None, extra_time: bool, penalties: bool) -> None:
-    if home_goals is None or away_goals is None:
+def update_match_result(
+    match_id: int,
+    home_goals: int | None,
+    away_goals: int | None,
+    winner_team_id: int | None,
+    extra_time: bool,
+    penalties: bool,
+    status: str = "played",
+) -> None:
+    status = str(status or "pending").strip().lower()
+    if status not in ["pending", "played"]:
         status = "pending"
+
+    row = get_one("SELECT home_team_id, away_team_id, round_key FROM matches WHERE id=?", [match_id])
+
+    if status == "pending":
         winner_team_id = None
+        extra_time = False
+        penalties = False
     else:
-        status = "played"
-        row = get_one("SELECT home_team_id, away_team_id, round_key FROM matches WHERE id=?", [match_id])
-        if row and row["round_key"] == "grupos":
+        if home_goals is None or away_goals is None:
+            status = "pending"
+            winner_team_id = None
+            extra_time = False
+            penalties = False
+        elif row and row["round_key"] == "grupos":
             if home_goals > away_goals:
                 winner_team_id = int(row["home_team_id"])
             elif away_goals > home_goals:
                 winner_team_id = int(row["away_team_id"])
             else:
                 winner_team_id = None
+
     execute(
-        """UPDATE matches SET home_goals=?, away_goals=?, winner_team_id=?, extra_time=?, penalties=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+        """
+        UPDATE matches
+        SET home_goals=?,
+            away_goals=?,
+            winner_team_id=?,
+            extra_time=?,
+            penalties=?,
+            status=?,
+            updated_at=CURRENT_TIMESTAMP
+        WHERE id=?
+        """,
         [home_goals, away_goals, winner_team_id, int(bool(extra_time)), int(bool(penalties)), status, match_id],
     )
-
 
 def upsert_prediction(tournament_id: int, participant_id: int, match_id: int, hg: int | None, ag: int | None, scope: str, round_key: str, winner: int | None, et: bool, pen: bool, is_initial: bool) -> None:
     execute(
@@ -347,6 +388,64 @@ def validate_extra(tournament_id: int, participant_id: int, field_key: str, corr
         """INSERT INTO extra_validations(tournament_id, participant_id, field_key, is_correct)
         VALUES(?,?,?,?) ON CONFLICT(tournament_id, participant_id, field_key) DO UPDATE SET is_correct=excluded.is_correct, updated_at=CURRENT_TIMESTAMP""",
         [tournament_id, participant_id, field_key, int(bool(correct))],
+    )
+
+
+
+def clear_initial_bracket_round(tournament_id: int, participant_id: int, round_key: str) -> None:
+    rows = query_df(
+        "SELECT id FROM initial_bracket_matches WHERE tournament_id=? AND participant_id=? AND round_key=?",
+        [tournament_id, participant_id, round_key],
+    )
+    with conn() as c:
+        for _, r in rows.iterrows():
+            c.execute(
+                "DELETE FROM predictions WHERE tournament_id=? AND participant_id=? AND scope='initial' AND match_id=?",
+                [tournament_id, participant_id, -int(r["id"])],
+            )
+        c.execute(
+            "DELETE FROM initial_bracket_matches WHERE tournament_id=? AND participant_id=? AND round_key=?",
+            [tournament_id, participant_id, round_key],
+        )
+        c.commit()
+    sync_to_sheets_if_configured()
+
+
+def clear_initial_bracket_rounds(tournament_id: int, participant_id: int, round_keys: list[str]) -> None:
+    for rk in round_keys:
+        clear_initial_bracket_round(tournament_id, participant_id, rk)
+
+
+def add_initial_bracket_match(tournament_id: int, participant_id: int, round_key: str, bracket_slot: str, home_team_id: int, away_team_id: int, origin: str = "player_initial") -> None:
+    execute(
+        """INSERT INTO initial_bracket_matches(tournament_id, participant_id, round_key, bracket_slot, home_team_id, away_team_id, origin)
+        VALUES(?,?,?,?,?,?,?)
+        ON CONFLICT(tournament_id, participant_id, round_key, bracket_slot) DO UPDATE SET
+        home_team_id=excluded.home_team_id,
+        away_team_id=excluded.away_team_id,
+        origin=excluded.origin,
+        updated_at=CURRENT_TIMESTAMP""",
+        [tournament_id, participant_id, round_key, bracket_slot, home_team_id, away_team_id, origin],
+    )
+
+
+def load_initial_bracket_matches(tournament_id: int, participant_id: int, round_key: str) -> pd.DataFrame:
+    return query_df(
+        """
+        SELECT -ibm.id AS id, ibm.id AS initial_match_id, ibm.tournament_id, ibm.participant_id,
+               ibm.round_key, ibm.bracket_slot, NULL AS phase, NULL AS group_letter, NULL AS matchday,
+               ibm.home_team_id, ibm.away_team_id,
+               ht.name AS home_team, at.name AS away_team, NULL AS winner_team,
+               NULL AS kickoff_datetime, NULL AS home_goals, NULL AS away_goals, NULL AS winner_team_id,
+               0 AS extra_time, 0 AS penalties, NULL AS resolution, 'initial_projection' AS status, ibm.origin,
+               999 AS manual_tiebreak_order, ibm.created_at, ibm.updated_at
+        FROM initial_bracket_matches ibm
+        JOIN teams ht ON ht.id=ibm.home_team_id
+        JOIN teams at ON at.id=ibm.away_team_id
+        WHERE ibm.tournament_id=? AND ibm.participant_id=? AND ibm.round_key=?
+        ORDER BY CAST(REPLACE(ibm.bracket_slot,'M','') AS INTEGER), ibm.id
+        """,
+        [tournament_id, participant_id, round_key],
     )
 
 
