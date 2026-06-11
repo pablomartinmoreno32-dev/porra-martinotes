@@ -298,8 +298,79 @@ def render_matches_results(tournament_id: int, admin: bool):
     status = c3.selectbox("Estado", ["Todos", "pending", "played"])
     df = matches.copy()
     if rk != "Todos": df = df[df["round_key"] == rk]
-    if group != "Todos": df = df[df["group_letter"] == group]
-    if status != "Todos": df = df[df["status"] == status]
+if group != "Todos": df = df[df["group_letter"] == group]
+if status != "Todos": df = df[df["status"] == status]
+
+if admin:
+    st.markdown("### Acción de estado")
+
+    if df.empty:
+        st.info("No hay partidos visibles sobre los que aplicar cambios de estado.")
+    else:
+        labels = {0: "Todos los partidos visibles"}
+
+        for _, r in df.iterrows():
+            labels[int(r["id"])] = (
+                f"#{int(r['id'])} · {ROUND_NAMES.get(str(r['round_key']), str(r['round_key']))} · "
+                f"{r['home_team']} vs {r['away_team']} · estado actual: {r['status']}"
+            )
+
+        a1, a2, a3 = st.columns([5, 2, 2])
+
+        target = a1.selectbox(
+            "Partido(s) a modificar",
+            list(labels.keys()),
+            format_func=lambda x: labels[x],
+            key="status_action_target",
+        )
+
+        new_status = a2.selectbox(
+            "Nuevo estado",
+            ["pending", "played"],
+            format_func=lambda x: "Pendiente" if x == "pending" else "Jugado",
+            key="status_action_new_status",
+        )
+
+        if a3.button("Aplicar estado", type="secondary", key="apply_status_action"):
+            if target == 0:
+                ids = [int(x) for x in df["id"].tolist()]
+            else:
+                ids = [int(target)]
+
+            placeholders = ",".join(["?"] * len(ids))
+
+            with db.defer_sheets_sync():
+                if new_status == "pending":
+                    db.execute(
+                        f"""
+                        UPDATE matches
+                        SET status=?,
+                            winner_team_id=NULL,
+                            extra_time=0,
+                            penalties=0,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE tournament_id=?
+                          AND id IN ({placeholders})
+                        """,
+                        [new_status, tournament_id] + ids,
+                    )
+                else:
+                    db.execute(
+                        f"""
+                        UPDATE matches
+                        SET status=?,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE tournament_id=?
+                          AND id IN ({placeholders})
+                        """,
+                        [new_status, tournament_id] + ids,
+                    )
+
+            st.success(f"Estado actualizado a {new_status} para {len(ids)} partido(s).")
+            rerun()
+
+names = team_options(teams)
+changes = []
     names = team_options(teams)
     changes = []
     for _, m in df.iterrows():
