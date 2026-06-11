@@ -282,123 +282,196 @@ def render_classifications(tournament_id: int):
     thirds = compute_third_place_ranking(standings, overrides)
     st.dataframe(thirds[["Rank3", "Equipo", "Grupo", "Pts", "DG", "GF", "Clasifica"]], hide_index=True, use_container_width=True)
 
-
 def render_matches_results(tournament_id: int, admin: bool):
     st.subheader("Partidos y resultados")
     matches, teams = load_matches(tournament_id), load_teams(tournament_id)
+
     if admin:
         render_match_management(tournament_id, matches, teams)
         st.divider()
+
     if matches.empty:
         st.info("No hay partidos.")
         return
+
     c1, c2, c3 = st.columns(3)
-    rk = c1.selectbox("Ronda", ["Todos"] + ROUND_KEYS, format_func=lambda x: "Todos" if x == "Todos" else ROUND_NAMES.get(x, x))
-    group = c2.selectbox("Grupo", ["Todos"] + sorted([x for x in matches["group_letter"].dropna().unique().tolist()]))
+
+    rk = c1.selectbox(
+        "Ronda",
+        ["Todos"] + ROUND_KEYS,
+        format_func=lambda x: "Todos" if x == "Todos" else ROUND_NAMES.get(x, x),
+    )
+
+    group = c2.selectbox(
+        "Grupo",
+        ["Todos"] + sorted([x for x in matches["group_letter"].dropna().unique().tolist()]),
+    )
+
     status = c3.selectbox("Estado", ["Todos", "pending", "played"])
+
     df = matches.copy()
-    if rk != "Todos": df = df[df["round_key"] == rk]
-if group != "Todos": df = df[df["group_letter"] == group]
-if status != "Todos": df = df[df["status"] == status]
 
-if admin:
-    st.markdown("### Acción de estado")
+    if rk != "Todos":
+        df = df[df["round_key"] == rk]
 
-    if df.empty:
-        st.info("No hay partidos visibles sobre los que aplicar cambios de estado.")
-    else:
-        labels = {0: "Todos los partidos visibles"}
+    if group != "Todos":
+        df = df[df["group_letter"] == group]
 
-        for _, r in df.iterrows():
-            labels[int(r["id"])] = (
-                f"#{int(r['id'])} · {ROUND_NAMES.get(str(r['round_key']), str(r['round_key']))} · "
-                f"{r['home_team']} vs {r['away_team']} · estado actual: {r['status']}"
+    if status != "Todos":
+        df = df[df["status"] == status]
+
+    if admin:
+        st.markdown("### Cambiar estado de partidos")
+
+        if df.empty:
+            st.info("No hay partidos visibles para modificar.")
+        else:
+            labels = {0: "Todos los partidos visibles"}
+
+            for _, r in df.iterrows():
+                labels[int(r["id"])] = (
+                    f"#{int(r['id'])} · "
+                    f"{ROUND_NAMES.get(str(r['round_key']), str(r['round_key']))} · "
+                    f"{r['home_team']} vs {r['away_team']} · "
+                    f"estado actual: {r['status']}"
+                )
+
+            a1, a2, a3 = st.columns([5, 2, 2])
+
+            target = a1.selectbox(
+                "Partido(s)",
+                list(labels.keys()),
+                format_func=lambda x: labels[x],
+                key="status_action_target",
             )
 
-        a1, a2, a3 = st.columns([5, 2, 2])
+            new_status = a2.selectbox(
+                "Nuevo estado",
+                ["pending", "played"],
+                format_func=lambda x: "Pendiente" if x == "pending" else "Jugado",
+                key="status_action_new_status",
+            )
 
-        target = a1.selectbox(
-            "Partido(s) a modificar",
-            list(labels.keys()),
-            format_func=lambda x: labels[x],
-            key="status_action_target",
-        )
-
-        new_status = a2.selectbox(
-            "Nuevo estado",
-            ["pending", "played"],
-            format_func=lambda x: "Pendiente" if x == "pending" else "Jugado",
-            key="status_action_new_status",
-        )
-
-        if a3.button("Aplicar estado", type="secondary", key="apply_status_action"):
-            if target == 0:
-                ids = [int(x) for x in df["id"].tolist()]
-            else:
-                ids = [int(target)]
-
-            placeholders = ",".join(["?"] * len(ids))
-
-            with db.defer_sheets_sync():
-                if new_status == "pending":
-                    db.execute(
-                        f"""
-                        UPDATE matches
-                        SET status=?,
-                            winner_team_id=NULL,
-                            extra_time=0,
-                            penalties=0,
-                            updated_at=CURRENT_TIMESTAMP
-                        WHERE tournament_id=?
-                          AND id IN ({placeholders})
-                        """,
-                        [new_status, tournament_id] + ids,
-                    )
+            if a3.button("Aplicar estado", type="secondary", key="apply_status_action"):
+                if target == 0:
+                    ids = [int(x) for x in df["id"].tolist()]
                 else:
-                    db.execute(
-                        f"""
-                        UPDATE matches
-                        SET status=?,
-                            updated_at=CURRENT_TIMESTAMP
-                        WHERE tournament_id=?
-                          AND id IN ({placeholders})
-                        """,
-                        [new_status, tournament_id] + ids,
-                    )
+                    ids = [int(target)]
 
-            st.success(f"Estado actualizado a {new_status} para {len(ids)} partido(s).")
-            rerun()
+                if ids:
+                    placeholders = ",".join(["?"] * len(ids))
 
-names = team_options(teams)
-changes = []
+                    with db.defer_sheets_sync():
+                        if new_status == "pending":
+                            db.execute(
+                                f"""
+                                UPDATE matches
+                                SET status=?,
+                                    winner_team_id=NULL,
+                                    extra_time=0,
+                                    penalties=0,
+                                    updated_at=CURRENT_TIMESTAMP
+                                WHERE tournament_id=?
+                                  AND id IN ({placeholders})
+                                """,
+                                [new_status, tournament_id] + ids,
+                            )
+                        else:
+                            db.execute(
+                                f"""
+                                UPDATE matches
+                                SET status=?,
+                                    updated_at=CURRENT_TIMESTAMP
+                                WHERE tournament_id=?
+                                  AND id IN ({placeholders})
+                                """,
+                                [new_status, tournament_id] + ids,
+                            )
+
+                    st.success(f"Estado actualizado a {new_status} para {len(ids)} partido(s).")
+                    rerun()
+
+        st.divider()
+
     names = team_options(teams)
     changes = []
+
     for _, m in df.iterrows():
         with st.container(border=True):
             c1, c2, c3, c4, c5, c6 = st.columns([3, 1, .2, 1, 3, 3])
+
             c1.write(f"**{m['home_team']}**")
             c5.write(f"**{m['away_team']}**")
+
             if admin:
-                hg = c2.number_input("GL", 0, 30, safe_int(m["home_goals"], 0), key=f"real_h_{m['id']}", label_visibility="collapsed")
+                hg = c2.number_input(
+                    "GL",
+                    0,
+                    30,
+                    safe_int(m["home_goals"], 0),
+                    key=f"real_h_{m['id']}",
+                    label_visibility="collapsed",
+                )
+
                 c3.markdown("### -")
-                ag = c4.number_input("GV", 0, 30, safe_int(m["away_goals"], 0), key=f"real_a_{m['id']}", label_visibility="collapsed")
-                winner = None; et = pen = False
+
+                ag = c4.number_input(
+                    "GV",
+                    0,
+                    30,
+                    safe_int(m["away_goals"], 0),
+                    key=f"real_a_{m['id']}",
+                    label_visibility="collapsed",
+                )
+
+                winner = None
+                et = False
+                pen = False
+
                 if m["round_key"] != "grupos":
-                    et = c6.checkbox("Prórroga", bool(m["extra_time"]), key=f"real_et_{m['id']}")
-                    pen = c6.checkbox("Penaltis", bool(m["penalties"]), key=f"real_pen_{m['id']}")
+                    et = c6.checkbox(
+                        "Prórroga",
+                        bool(m["extra_time"]),
+                        key=f"real_et_{m['id']}",
+                    )
+
+                    pen = c6.checkbox(
+                        "Penaltis",
+                        bool(m["penalties"]),
+                        key=f"real_pen_{m['id']}",
+                    )
+
                     ids = [int(m["home_team_id"]), int(m["away_team_id"])]
                     default_w = safe_int(m["winner_team_id"], ids[0])
-                    winner = c6.selectbox("Pasa", ids, index=ids.index(default_w) if default_w in ids else 0, format_func=lambda x: names.get(x, x), key=f"real_w_{m['id']}")
+
+                    winner = c6.selectbox(
+                        "Pasa",
+                        ids,
+                        index=ids.index(default_w) if default_w in ids else 0,
+                        format_func=lambda x: names.get(x, x),
+                        key=f"real_w_{m['id']}",
+                    )
+
                 changes.append((int(m["id"]), hg, ag, winner, et, pen))
+
             else:
-                res = "—" if pd.isna(m["home_goals"]) or pd.isna(m["away_goals"]) else f"{int(m['home_goals'])} - {int(m['away_goals'])}"
+                if str(m.get("status")) != "played":
+                    res = "—"
+                elif pd.isna(m["home_goals"]) or pd.isna(m["away_goals"]):
+                    res = "—"
+                else:
+                    res = f"{int(m['home_goals'])} - {int(m['away_goals'])}"
+
                 c2.markdown(f"### {res}")
+
                 if pd.notna(m.get("winner_team")):
                     c6.caption(f"Pasa: {m['winner_team']}")
+
     if admin and st.button("Guardar todos los resultados visibles", type="primary"):
         with db.defer_sheets_sync():
             for row in changes:
                 db.update_match_result(*row)
+
         st.success("Resultados guardados.")
         rerun()
 
